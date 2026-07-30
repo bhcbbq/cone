@@ -1,8 +1,35 @@
 import cv2
 import numpy as np
 import math
-import os
+import serial  # [추가된 부분] 시리얼 통신 라이브러리
+import time    # [추가된 부분] 통신 초기화 대기용
 
+# ==========================================
+# 1. CSI 카메라 GStreamer 파이프라인 설정 함수
+# ==========================================
+def gstreamer_pipeline(
+    capture_width=1280,
+    capture_height=720,
+    display_width=640,
+    display_height=480,
+    framerate=30,
+    flip_method=0,
+):
+    return (
+        "nvarguscamerasrc ! "
+        "video/x-raw(memory:NVMM), "
+        f"width=(int){capture_width}, height=(int){capture_height}, "
+        f"format=(string)NV12, framerate=(fraction){framerate}/1 ! "
+        f"nvvidconv flip-method={flip_method} ! "
+        f"video/x-raw, width=(int){display_width}, height=(int){display_height}, format=(string)BGRx ! "
+        "videoconvert ! "
+        "video/x-raw, format=(string)BGR ! "
+        "appsink"
+    )
+
+# ==========================================
+# 2. 차선 인식 및 조향(Steering) 계산 함수
+# ==========================================
 def calculate_steering(frame, lines):
     height, width = frame.shape[:2]
     camera_center = width // 2  # 라바콘(카메라)의 현재 위치 (화면 정중앙 기준점)
@@ -15,7 +42,7 @@ def calculate_steering(frame, lines):
     right_line_x = []
     right_line_y = []
 
-    # 1. 선분들을 왼쪽/오른쪽 차선으로 분류
+    # 선분들을 왼쪽/오른쪽 차선으로 분류
     for line in lines:
         x1, y1, x2, y2 = line.flatten()
         if x1 == x2: continue 
@@ -38,7 +65,7 @@ def calculate_steering(frame, lines):
     left_x_top = None
     right_x_top = None
 
-    # 2. 양쪽 초록색 차선 연장선 그리기 및 좌표 추출
+    # 양쪽 초록색 차선 연장선 그리기 및 좌표 추출
     if len(left_line_x) > 0:
         poly_left = np.polyfit(left_line_y, left_line_x, 1) 
         left_x_bottom = int(np.polyval(poly_left, y_bottom))
@@ -51,7 +78,7 @@ def calculate_steering(frame, lines):
         right_x_top = int(np.polyval(poly_right, y_top))
         cv2.line(frame, (right_x_bottom, y_bottom), (right_x_top, y_top), (0, 255, 0), 8)
 
-    # 3. 차로의 실제 정중앙값(Center) 계산 (바닥과 상단 소실점 부근 각각 계산)
+    # 차로의 실제 정중앙값(Center) 계산
     lane_center_bottom = camera_center
     lane_center_top = camera_center
 
@@ -61,32 +88,28 @@ def calculate_steering(frame, lines):
     if left_x_top is not None and right_x_top is not None:
         lane_center_top = (left_x_top + right_x_top) // 2
 
-
     # 차로의 정중앙 노선을 나타내는 노란색 수직선 그리기
     cv2.line(frame, (lane_center_bottom, y_bottom), (lane_center_top, y_top), (0, 255, 255), 3)
 
-    # 4. 라바콘 위치와 차로 정중앙의 오차(Error) 계산
-    # 로봇 바로 앞 바닥 제어 시점에서의 오차를 구함
+    # 오차(Error) 계산
     error = camera_center - lane_center_bottom
-
-    # 임의의 허용 오차범위(Threshold) 설정 (예: +-20 픽셀 이내는 정상 주행으로 판단)
     error_margin = 20
     
     # 시각화: 현재 오차 거리를 보여주는 하단 가로 빨간선 및 고정 점들
     cv2.circle(frame, (camera_center, y_bottom - 40), 8, (255, 0, 0), -1)        # 파란 점: 라바콘 위치
-    cv2.circle(frame, (lane_center_bottom, y_bottom - 40), 8, (0, 255, 0), -1)  # 초록 점: 실제 차로 중앙
-    cv2.line(frame, (camera_center, y_bottom - 40), (lane_center_bottom, y_bottom - 40), (0, 0, 255), 4) # 빨간 선: 오차 크기
+    cv2.circle(frame, (lane_center_bottom, y_bottom - 40), 8, (0, 255, 0), -1)   # 초록 점: 실제 차로 중앙
+    cv2.line(frame, (camera_center, y_bottom - 40), (lane_center_bottom, y_bottom - 40), (0, 0, 255), 4)
 
-    # 5. 오차범위 판별에 따른 상태 메시지 출력
+    # 오차범위 판별에 따른 상태 메시지 출력
     if abs(error) <= error_margin:
         status_text = "Status: Stable (On Track)"
-        status_color = (0, 255, 0) # 안정 상태는 초록색 텍스트
+        status_color = (0, 255, 0)
     else:
         direction = "Left" if error > 0 else "Right"
         status_text = f"Status: Alert (Turn {direction})"
-        status_color = (0, 0, 255) # 범위를 벗어나면 빨간색 텍스트
+        status_color = (0, 0, 255)
 
-    # 화면 좌측 상단 데이터 모니터링 출력
+    # 화면 모니터링 출력
     cv2.putText(frame, f"Error: {error} px (Margin: +/-{error_margin}px)", (30, 50), 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
     cv2.putText(frame, status_text, (30, 90), 
@@ -106,77 +129,100 @@ def region_of_interest(img, vertices):
     masked_image = cv2.bitwise_and(img, mask)
     return masked_image
 
-# 1. 윈도우 생성 및 실시간 튜닝용 트랙바 부착
-window_name = 'Future Makers - Lane Detection'
-cv2.namedWindow(window_name)
-cv2.createTrackbar('Low_Threshold', window_name, 50, 255, nothing)
-cv2.createTrackbar('High_Threshold', window_name, 150, 255, nothing)
+# ==========================================
+# 3. 메인 실행 파트
+# ==========================================
+if __name__ == "__main__":
+    
+    # [추가된 부분] 아두이노 시리얼 통신 초기화
+    # 주의: '/dev/ttyACM0' 부분은 젯슨 나노 환경에 따라 '/dev/ttyUSB0' 일 수 있습니다. (ls /dev/tty* 로 확인)
+    arduino = None
+    try:
+        print("[알림] 아두이노 연결을 시도합니다...")
+        arduino = serial.Serial('/dev/ttyACM0', 9600, timeout=1)
+        time.sleep(2) # 아두이노가 재부팅하고 시리얼 연결을 준비할 시간을 줍니다.
+        print("[알림] 아두이노와 연결되었습니다!")
+    except serial.SerialException as e:
+        print(f"[경고] 아두이노를 찾을 수 없습니다: {e}")
+        print("[경고] 아두이노 연결 없이 카메라 동작만 진행합니다.")
 
-# 2. 동영상 불러오기 (터미널 경로 오류 방지를 위해 절대 경로 사용)
-# 파일명이나 폴더 이름이 다르다면 아래 빨간 글씨(경로) 부분을 수정해주세요.
-video_path = r'C:\Users\noah4\OneDrive\바탕 화면\cone\test_video.mp4'
+    # 윈도우 생성 및 트랙바 부착
+    window_name = 'Future Makers - Lane Detection'
+    cv2.namedWindow(window_name)
+    cv2.createTrackbar('Low_Threshold', window_name, 50, 255, nothing)
+    cv2.createTrackbar('High_Threshold', window_name, 150, 255, nothing)
 
-# 만약 노트북 웹캠으로 바로 띄워보고 싶다면 위 코드는 주석(#) 처리하고 아래 코드를 쓰시면 됩니다.
-# cap = cv2.VideoCapture(0)
+    # 동영상 대신 CSI 카메라 파이프라인 연결
+    print("[알림] CSI 카메라를 초기화 중입니다...")
+    pipeline = gstreamer_pipeline(flip_method=0)
+    cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
 
-cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        print("="*60)
+        print("[에러] CSI 카메라를 열 수 없습니다!")
+        print("카메라 케이블 연결 상태나 nvarguscamerasrc 데몬 상태를 확인하세요.")
+        print("="*60)
+        exit()
 
-# 영상 파일이 정상적으로 열렸는지 확인하는 안전장치
-if not cap.isOpened():
-    print("="*60)
-    print("[에러] 영상을 불러올 수 없습니다!")
-    print(f"원인 1: '{video_path}' 경로에 파일이 없습니다.")
-    print("원인 2: 동영상 파일 이름이 'test_video.mp4'가 아닐 수 있습니다.")
-    print("="*60)
-    exit() # 프로그램 강제 종료
+    print("[알림] 카메라가 정상적으로 구동 중입니다. 종료하려면 'q'를 누르세요.")
 
-while cap.isOpened():
-    ret, frame = cap.read()
-    if not ret:
-        print("[알림] 영상 재생이 끝났거나 프레임을 읽을 수 없어 종료합니다.")
-        break # 영상이 끝나면 루프 종료
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            print("[알림] 프레임을 읽어오지 못했습니다. 카메라 연결을 확인하세요.")
+            break 
 
-    # 영상 크기 정보 추출
-    height, width = frame.shape[:2]
+        # 영상 크기 정보 추출
+        height, width = frame.shape[:2]
 
-    # 3. Grayscale 변환
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        # Grayscale 변환
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-    # 4. Gaussian Blur 
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        # Gaussian Blur 
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
 
-    # 트랙바에서 현재 설정된 Canny 임계값 읽어오기
-    low_t = cv2.getTrackbarPos('Low_Threshold', window_name)
-    high_t = cv2.getTrackbarPos('High_Threshold', window_name)
+        # 트랙바에서 현재 설정된 Canny 임계값 읽어오기
+        low_t = cv2.getTrackbarPos('Low_Threshold', window_name)
+        high_t = cv2.getTrackbarPos('High_Threshold', window_name)
 
-    # 5. Canny Edge Detection (이미지의 윤곽선 추출)
-    edges = cv2.Canny(blur, low_t, high_t)
+        # Canny Edge Detection
+        edges = cv2.Canny(blur, low_t, high_t)
 
-    # 6. ROI (관심 영역) 설정
-    # 카메라 시점에 따라 차선이 보이는 바닥 부분만 남기기 위한 좌표 설정
-    roi_vertices = [
-        (0, height), # 좌측 하단
-        (width / 2 - 50, height / 2 + 50), # 중앙 좌측 상단 (소실점 근처)
-        (width / 2 + 50, height / 2 + 50), # 중앙 우측 상단
-        (width, height) # 우측 하단
-    ]
-    cropped_edges = region_of_interest(edges, np.array([roi_vertices], np.int32))
+        # ROI (관심 영역) 설정 (화면 크기에 맞춰 동적으로 계산됨)
+        roi_vertices = [
+            (0, height), 
+            (int(width * 0.2), int(height * 0.45)),
+            (int(width * 0.8), int(height * 0.45)), 
+            (width, height)
+        ]
+        cropped_edges = region_of_interest(edges, np.array([roi_vertices], np.int32))
 
-# 7. Hough Transform (윤곽선 중에서 직선 성분만 찾아내기)
-    lines = cv2.HoughLinesP(cropped_edges, rho=1, theta=np.pi/180, threshold=40, 
-                            minLineLength=20, maxLineGap=10)
+        # Hough Transform (직선 성분 추출)
+        lines = cv2.HoughLinesP(cropped_edges, rho=1, theta=np.pi/180, threshold=40, 
+                                minLineLength=20, maxLineGap=10)
 
-    # 8. 조향 오차 계산 및 시각화
-    error, result_image = calculate_steering(frame.copy(), lines)
+        # 조향 오차 계산 및 시각화
+        error, result_image = calculate_steering(frame.copy(), lines)
 
-    # 결과 화면 출력
-    cv2.imshow(window_name, result_image)
-    cv2.imshow('Canny Edges (ROI)', cropped_edges) 
+        # [추가된 부분] 아두이노로 error 값 전송
+        if arduino is not None and arduino.is_open:
+            # 아두이노가 읽기 쉽게 끝에 개행문자('\n')를 붙여서 문자열로 전송합니다. (예: "15\n", "-20\n")
+            data_to_send = f"{error}\n"
+            arduino.write(data_to_send.encode('utf-8'))
 
-    # 키보드 'q'를 누르면 창이 닫힘
-    if cv2.waitKey(25) & 0xFF == ord('q'):
-        print("[알림] 사용자가 'q'를 눌러 프로그램을 종료했습니다.")
-        break
+        # 결과 화면 출력
+        cv2.imshow(window_name, result_image)
+        cv2.imshow('Canny Edges (ROI)', cropped_edges) 
 
-cap.release()
-cv2.destroyAllWindows()
+        # 'q' 누르면 종료
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            print("[알림] 사용자가 'q'를 눌러 프로그램을 종료했습니다.")
+            break
+
+    # [추가된 부분] 종료 시 시리얼 통신 포트 닫기
+    if arduino is not None and arduino.is_open:
+        arduino.close()
+        print("[알림] 아두이노 시리얼 통신을 종료했습니다.")
+
+    cap.release()
+    cv2.destroyAllWindows()
