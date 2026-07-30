@@ -210,6 +210,10 @@ if __name__ == "__main__":
             data_to_send = f"{error}\n"
             arduino.write(data_to_send.encode('utf-8'))
 
+            if arduino.in_waiting > 0:
+                received_data = arduino.readline().decode('utf-8').rstrip()
+                print(f"✅ {received_data}")
+
         # 결과 화면 출력
         cv2.imshow(window_name, result_image)
         cv2.imshow('Canny Edges (ROI)', cropped_edges) 
