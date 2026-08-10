@@ -13,9 +13,9 @@ const int IN3 = 9;
 const int IN4 = 10;
 
 
-// =========================
+// ========================
 // PID 설정
-// =========================
+// ========================
 
 float Kp = 2.0;
 float Ki = 0.0;
@@ -34,7 +34,7 @@ unsigned long previousTime = 0;
 // 기본 속도
 // =========================
 
-int baseSpeed = 120;
+int baseSpeed = 110;
 
 
 void setup() {
