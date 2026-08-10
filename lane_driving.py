@@ -139,7 +139,7 @@ if __name__ == "__main__":
     arduino = None
     try:
         print("[알림] 아두이노 연결을 시도합니다...")
-        arduino = serial.Serial('/dev/ttyACM0', 9600, timeout=1)
+        arduino = serial.Serial('/dev/ttyACM0', 115200, timeout=1)
         time.sleep(2) # 아두이노가 재부팅하고 시리얼 연결을 준비할 시간을 줍니다.
         print("[알림] 아두이노와 연결되었습니다!")
     except serial.SerialException as e:

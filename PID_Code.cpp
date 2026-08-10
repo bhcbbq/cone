@@ -30,7 +30,7 @@ int baseSpeed = 120;
 const float DEAD_ZONE = 5.0; // [개선] 이 픽셀 이내의 오차는 직진으로 간주
 
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(115200);
 
   pinMode(ENA, OUTPUT);
   pinMode(IN1, OUTPUT);
