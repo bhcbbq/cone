@@ -1,12 +1,12 @@
 // =========================
 // L298N 핀 설정
 // =========================
-const int ENA = 5;
-const int IN1 = 7;
+const int ENA = 10;
+const int IN1 = 9;
 const int IN2 = 8;
-const int ENB = 6;
-const int IN3 = 9;
-const int IN4 = 10;
+const int ENB = 7;
+const int IN3 = 6;
+const int IN4 = 5;
 
 // =========================
 // PID 설정
