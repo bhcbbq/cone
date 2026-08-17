@@ -1,38 +1,43 @@
 import cv2
 import numpy as np
 import math
-import serial  # [추가된 부분] 시리얼 통신 라이브러리
-import time    # [추가된 부분] 통신 초기화 대기용
+import serial 
+import time
+import json
+import threading
 
 # ==========================================
-# 1. CSI 카메라 GStreamer 파이프라인 설정 함수
+# 1. 통신 및 기본 설정
 # ==========================================
-def gstreamer_pipeline(
-    capture_width=1280,
-    capture_height=720,
-    display_width=640,
-    display_height=480,
-    framerate=30,
-    flip_method=0,
-):
-    return (
-        "nvarguscamerasrc ! "
-        "video/x-raw(memory:NVMM), "
-        f"width=(int){capture_width}, height=(int){capture_height}, "
-        f"format=(string)NV12, framerate=(fraction){framerate}/1 ! "
-        f"nvvidconv flip-method={flip_method} ! "
-        f"video/x-raw, width=(int){display_width}, height=(int){display_height}, format=(string)BGRx ! "
-        "videoconvert ! "
-        "video/x-raw, format=(string)BGR ! "
-        "appsink"
-    )
+try:
+    ugv_serial = serial.Serial('/dev/ttyUSB0', 115200, timeout=0.1)
+    print("[알림] UGV02와 정상적으로 연결되었습니다!")
+except Exception as e:
+    print(f"[에러] UGV02 연결 실패: {e}")
+    exit()
+
+try:
+    hc12_serial = serial.Serial('/dev/ttyUSB1', 9600, timeout=0.1)
+    print("[알림] HC-12 무선 통신 모듈이 준비되었습니다!")
+except:
+    print("[경고] HC-12 포트를 찾을 수 없습니다. 무선 전송이 생략됩니다.")
+    hc12_serial = None
+
+BASE_SPEED = 0.3  # 기본 직진 속도 (m/s)
 
 # ==========================================
-# 2. 차선 인식 및 조향(Steering) 계산 함수
+# 2. 스레드 공유 변수 
+# ==========================================
+shared_error = 0             
+error_lock = threading.Lock() 
+is_running = True            
+
+# ==========================================
+# 3. 예전 방식 그대로! 차선 인식 및 조향 시각화 함수
 # ==========================================
 def calculate_steering(frame, lines):
     height, width = frame.shape[:2]
-    camera_center = width // 2  # 라바콘(카메라)의 현재 위치 (화면 정중앙 기준점)
+    camera_center = width // 2  
 
     if lines is None:
         return 0, frame 
@@ -42,7 +47,6 @@ def calculate_steering(frame, lines):
     right_line_x = []
     right_line_y = []
 
-    # 선분들을 왼쪽/오른쪽 차선으로 분류
     for line in lines:
         x1, y1, x2, y2 = line.flatten()
         if x1 == x2: continue 
@@ -65,7 +69,6 @@ def calculate_steering(frame, lines):
     left_x_top = None
     right_x_top = None
 
-    # 양쪽 초록색 차선 연장선 그리기 및 좌표 추출
     if len(left_line_x) > 0:
         poly_left = np.polyfit(left_line_y, left_line_x, 1) 
         left_x_bottom = int(np.polyval(poly_left, y_bottom))
@@ -78,7 +81,6 @@ def calculate_steering(frame, lines):
         right_x_top = int(np.polyval(poly_right, y_top))
         cv2.line(frame, (right_x_bottom, y_bottom), (right_x_top, y_top), (0, 255, 0), 8)
 
-    # 차로의 실제 정중앙값(Center) 계산
     lane_center_bottom = camera_center
     lane_center_top = camera_center
 
@@ -88,19 +90,15 @@ def calculate_steering(frame, lines):
     if left_x_top is not None and right_x_top is not None:
         lane_center_top = (left_x_top + right_x_top) // 2
 
-    # 차로의 정중앙 노선을 나타내는 노란색 수직선 그리기
     cv2.line(frame, (lane_center_bottom, y_bottom), (lane_center_top, y_top), (0, 255, 255), 3)
 
-    # 오차(Error) 계산
     error = camera_center - lane_center_bottom
     error_margin = 20
     
-    # 시각화: 현재 오차 거리를 보여주는 하단 가로 빨간선 및 고정 점들
-    cv2.circle(frame, (camera_center, y_bottom - 40), 8, (255, 0, 0), -1)        # 파란 점: 라바콘 위치
-    cv2.circle(frame, (lane_center_bottom, y_bottom - 40), 8, (0, 255, 0), -1)   # 초록 점: 실제 차로 중앙
+    cv2.circle(frame, (camera_center, y_bottom - 40), 8, (255, 0, 0), -1)        
+    cv2.circle(frame, (lane_center_bottom, y_bottom - 40), 8, (0, 255, 0), -1)   
     cv2.line(frame, (camera_center, y_bottom - 40), (lane_center_bottom, y_bottom - 40), (0, 0, 255), 4)
 
-    # 오차범위 판별에 따른 상태 메시지 출력
     if abs(error) <= error_margin:
         status_text = "Status: Stable (On Track)"
         status_color = (0, 255, 0)
@@ -109,7 +107,6 @@ def calculate_steering(frame, lines):
         status_text = f"Status: Alert (Turn {direction})"
         status_color = (0, 0, 255)
 
-    # 화면 모니터링 출력
     cv2.putText(frame, f"Error: {error} px (Margin: +/-{error_margin}px)", (30, 50), 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
     cv2.putText(frame, status_text, (30, 90), 
@@ -117,116 +114,147 @@ def calculate_steering(frame, lines):
 
     return error, frame
 
-# 트랙바 조작을 위한 더미(Dummy) 함수
-def nothing(x):
-    pass
-
-# 관심 영역(ROI)을 잘라내는 함수
+# 관심 영역(ROI) 함수
 def region_of_interest(img, vertices):
     mask = np.zeros_like(img)
     match_mask_color = 255
     cv2.fillPoly(mask, vertices, match_mask_color)
-    masked_image = cv2.bitwise_and(img, mask)
-    return masked_image
+    return cv2.bitwise_and(img, mask)
 
 # ==========================================
-# 3. 메인 실행 파트
+# 4. [백그라운드 스레드] 로봇 제어 및 통신 전담
+# ==========================================
+def control_thread_task():
+    global shared_error, is_running
+    
+    total_distance = 0.0
+    previous_error = 0
+    last_time = time.time()
+    last_hc12_send_time = time.time()
+    
+    Kp = 0.005  
+    Kd = 0.002  
+
+    print("[알림] 제어 및 통신 백그라운드 스레드가 시작되었습니다.")
+
+    while is_running:
+        current_time = time.time()
+        dt = current_time - last_time
+        if dt <= 0: dt = 0.001
+        last_time = current_time
+
+        # UGV02 엔코더(Odometry) 피드백 수신 및 거리 계산
+        while ugv_serial.in_waiting > 0:
+            try:
+                raw_data = ugv_serial.readline().decode('utf-8').strip()
+                if not raw_data:
+                    continue
+                feedback = json.loads(raw_data)
+                
+                # T:1001 및 L/R 키는 제조사 위키 확인 후 수정 필요
+                if feedback.get("T") == 1001: 
+                    left_speed = feedback.get("L", 0.0)
+                    right_speed = feedback.get("R", 0.0)
+                    real_speed = (left_speed + right_speed) / 2.0
+                    total_distance += real_speed * dt
+            except json.JSONDecodeError:
+                pass 
+
+        # PID 계산
+        with error_lock:
+            current_error = shared_error
+
+        derivative = (current_error - previous_error) / dt
+        angular_z = -(Kp * current_error + Kd * derivative)
+        previous_error = current_error
+
+        # UGV02 주행 명령 송신
+        command_dict = {"T": 13, "X": BASE_SPEED, "Z": round(angular_z, 3)}
+        ugv_serial.write((json.dumps(command_dict) + '\n').encode('utf-8'))
+
+        # HC-12 중계기 무선 송신
+        if hc12_serial and (current_time - last_hc12_send_time) >= 1.0:
+            send_msg = f"DIST: {total_distance:.2f} m\n"
+            hc12_serial.write(send_msg.encode('utf-8'))
+            last_hc12_send_time = current_time
+
+        time.sleep(0.02) 
+
+# ==========================================
+# 5. [메인 스레드] 메인 실행 파트
 # ==========================================
 if __name__ == "__main__":
     
-    # [추가된 부분] 아두이노 시리얼 통신 초기화
-    # 주의: '/dev/ttyACM0' 부분은 젯슨 나노 환경에 따라 '/dev/ttyUSB0' 일 수 있습니다. (ls /dev/tty* 로 확인)
-    arduino = None
-    try:
-        print("[알림] 아두이노 연결을 시도합니다...")
-        arduino = serial.Serial('/dev/ttyACM0', 115200, timeout=1)
-        time.sleep(2) # 아두이노가 재부팅하고 시리얼 연결을 준비할 시간을 줍니다.
-        print("[알림] 아두이노와 연결되었습니다!")
-    except serial.SerialException as e:
-        print(f"[경고] 아두이노를 찾을 수 없습니다: {e}")
-        print("[경고] 아두이노 연결 없이 카메라 동작만 진행합니다.")
+    # 백그라운드 스레드 시작
+    control_thread = threading.Thread(target=control_thread_task, daemon=True)
+    control_thread.start()
 
-    # 윈도우 생성 및 트랙바 부착
-    window_name = 'Future Makers - Lane Detection'
+    window_name = 'Future Makers - UGV02 Autonomous Driving'
     cv2.namedWindow(window_name)
-    cv2.createTrackbar('Low_Threshold', window_name, 50, 255, nothing)
-    cv2.createTrackbar('High_Threshold', window_name, 150, 255, nothing)
 
-    # 동영상 대신 CSI 카메라 파이프라인 연결
-    print("[알림] CSI 카메라를 초기화 중입니다...")
-    pipeline = gstreamer_pipeline(flip_method=0)
-    cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+    # 젯슨 나노용 CSI 카메라 또는 일반 USB 카메라 연결
+    print("[알림] 카메라를 초기화 중입니다...")
+    # 만약 CSI 카메라를 사용하신다면 기존의 gstreamer_pipeline 코드로 복구하셔도 됩니다.
+    cap = cv2.VideoCapture(0)
 
     if not cap.isOpened():
-        print("="*60)
-        print("[에러] CSI 카메라를 열 수 없습니다!")
-        print("카메라 케이블 연결 상태나 nvarguscamerasrc 데몬 상태를 확인하세요.")
-        print("="*60)
+        print("[에러] 카메라를 열 수 없습니다!")
         exit()
 
     print("[알림] 카메라가 정상적으로 구동 중입니다. 종료하려면 'q'를 누르세요.")
 
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            print("[알림] 프레임을 읽어오지 못했습니다. 카메라 연결을 확인하세요.")
-            break 
+    try:
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break 
 
-        # 영상 크기 정보 추출
-        height, width = frame.shape[:2]
+            height, width = frame.shape[:2]
 
-        # Grayscale 변환
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            blur = cv2.GaussianBlur(gray, (5, 5), 0)
+            
+            # Canny 임계값 고정 (트랙바 대신 안정적인 값 사용)
+            edges = cv2.Canny(blur, 50, 150)
 
-        # Gaussian Blur 
-        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+            roi_vertices = [
+                (0, height), 
+                (int(width * 0.2), int(height * 0.45)),
+                (int(width * 0.8), int(height * 0.45)), 
+                (width, height)
+            ]
+            cropped_edges = region_of_interest(edges, np.array([roi_vertices], np.int32))
 
-        # 트랙바에서 현재 설정된 Canny 임계값 읽어오기
-        low_t = cv2.getTrackbarPos('Low_Threshold', window_name)
-        high_t = cv2.getTrackbarPos('High_Threshold', window_name)
+            lines = cv2.HoughLinesP(cropped_edges, rho=1, theta=np.pi/180, threshold=40, 
+                                    minLineLength=20, maxLineGap=10)
 
-        # Canny Edge Detection
-        edges = cv2.Canny(blur, low_t, high_t)
+            # 조향 오차 계산 및 시각화 (예전 방식 그대로)
+            error, result_image = calculate_steering(frame.copy(), lines)
 
-        # ROI (관심 영역) 설정 (화면 크기에 맞춰 동적으로 계산됨)
-        roi_vertices = [
-            (0, height), 
-            (int(width * 0.2), int(height * 0.45)),
-            (int(width * 0.8), int(height * 0.45)), 
-            (width, height)
-        ]
-        cropped_edges = region_of_interest(edges, np.array([roi_vertices], np.int32))
+            # 계산된 오차값을 스레드 공유 변수에 업데이트
+            with error_lock:
+                shared_error = error
 
-        # Hough Transform (직선 성분 추출)
-        lines = cv2.HoughLinesP(cropped_edges, rho=1, theta=np.pi/180, threshold=40, 
-                                minLineLength=20, maxLineGap=10)
+            # 결과 화면 출력
+            cv2.imshow(window_name, result_image)
 
-        # 조향 오차 계산 및 시각화
-        error, result_image = calculate_steering(frame.copy(), lines)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                print("[알림] 사용자가 'q'를 눌러 프로그램을 종료했습니다.")
+                break
 
-        # [추가된 부분] 아두이노로 error 값 전송
-        if arduino is not None and arduino.is_open:
-            # 아두이노가 읽기 쉽게 끝에 개행문자('\n')를 붙여서 문자열로 전송합니다. (예: "15\n", "-20\n")
-            data_to_send = f"{error}\n"
-            arduino.write(data_to_send.encode('utf-8'))
-
-            if arduino.in_waiting > 0:
-                received_data = arduino.readline().decode('utf-8').rstrip()
-                print(f"✅ {received_data}")
-
-        # 결과 화면 출력
-        cv2.imshow(window_name, result_image)
-        cv2.imshow('Canny Edges (ROI)', cropped_edges) 
-
-        # 'q' 누르면 종료
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            print("[알림] 사용자가 'q'를 눌러 프로그램을 종료했습니다.")
-            break
-
-    # [추가된 부분] 종료 시 시리얼 통신 포트 닫기
-    if arduino is not None and arduino.is_open:
-        arduino.close()
-        print("[알림] 아두이노 시리얼 통신을 종료했습니다.")
-
-    cap.release()
-    cv2.destroyAllWindows()
+    except KeyboardInterrupt:
+        print("\n[알림] 강제 종료되었습니다.")
+        
+    finally:
+        print("[알림] 시스템을 안전하게 종료합니다.")
+        is_running = False  
+        control_thread.join() 
+        
+        stop_command = '{"T":13, "X":0.0, "Z":0.0}\n'
+        ugv_serial.write(stop_command.encode('utf-8'))
+        
+        ugv_serial.close()
+        if hc12_serial:
+            hc12_serial.close()
+        cap.release()
+        cv2.destroyAllWindows()

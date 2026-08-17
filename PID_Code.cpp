@@ -90,8 +90,8 @@ void loop() {
     // =========================
     // 좌우 모터 속도 계산
     // =========================
-    int leftSpeed  = baseSpeed + correction;
-    int rightSpeed = baseSpeed - correction;
+    int leftSpeed  = baseSpeed - correction;
+    int rightSpeed = baseSpeed + correction;
 
     leftSpeed = constrain(leftSpeed, 0, 255);
     rightSpeed = constrain(rightSpeed, 0, 255);
