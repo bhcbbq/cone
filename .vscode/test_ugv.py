@@ -16,4 +16,4 @@ threading.Thread(target=read_serial, daemon=True).start()
 while True:
     cmd = input("TX> ")
     ser.write((cmd + "\n").encode())
-## 이두원바보
+## 이
