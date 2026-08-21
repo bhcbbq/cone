@@ -7,6 +7,7 @@ def region_of_interest(img, vertices):
     [ROI 함수] 영상에서 불필요한 배경(하늘 등)을 지우고 바닥 차선만 남깁니다.
     """
     # 원본 이미지와 똑같은 크기의 까만색 도화지(mask)를 만듦
+    # 김주만
     mask = np.zeros_like(img)
     match_mask_color = 255
     
