@@ -7,7 +7,7 @@ import json
 import threading
 
 # ========================================
-# 1. 통신 및 기본 설정.
+# 1. 통신 및 기본 설정.dddd
 # ========================================
 try:
     ugv_serial = serial.Serial('/dev/ttyUSB0', 115200, timeout=0.1)
