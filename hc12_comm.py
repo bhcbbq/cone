@@ -1,6 +1,6 @@
 import serial
 
-def init_hc12(port='/dev/ttyUSB1', baudrate=9600):
+def init_hc12(port='/dev/ttyTHS1', baudrate=9600):
     """
     [무선 초기화 함수] 젯슨 나노와 HC-12 모듈을 연결합니다.
     """
