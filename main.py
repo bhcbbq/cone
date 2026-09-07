@@ -61,6 +61,25 @@ def control_thread_task():
 
         time.sleep(0.02) # 스레드 과부하 방지용 짧은 휴식
 
+def gstreamer_pipeline(
+    sensor_id=0,
+    capture_width=1280,
+    capture_height=720,
+    display_width=640,
+    display_height=360,
+    framerate=30,
+    flip_method=0, # 카메라가 뒤집혀있다면 2 (180도 회전) 로 변경하세요
+):
+    return (
+        "nvarguscamerasrc sensor-id=%d ! "
+        "video/x-raw(memory:NVMM), width=(int)%d, height=(int)%d, framerate=(fraction)%d/1 ! "
+        "nvvidconv flip-method=%d ! "
+        "video/x-raw, width=(int)%d, height=(int)%d, format=(string)BGRx ! "
+        "videoconvert ! "
+        "video/x-raw, format=(string)BGR ! appsink"
+        % (sensor_id, capture_width, capture_height, framerate, flip_method, display_width, display_height)
+    )
+
 # ==========================================
 # [메인 실행 파트] 영상 처리 및 시스템 지휘 (시각 파트)
 # ==========================================
@@ -78,8 +97,9 @@ if __name__ == "__main__":
     window_name = 'Future Makers - UGV02 Autonomous Driving'
     cv2.namedWindow(window_name)
 
-    print("[알림] 카메라를 초기화 중입니다...")
-    cap = cv2.VideoCapture(0) # 웹캠 연결
+    print("[알림] IMX219 CSI 카메라를 초기화 중입니다...")
+    pipeline = gstreamer_pipeline(flip_method=0)
+    cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER) # CSI 카메라 연결
 
     if not cap.isOpened():
         print("[에러] 카메라를 열 수 없습니다!")

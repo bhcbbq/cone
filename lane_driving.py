@@ -180,6 +180,25 @@ def control_thread_task():
 
         time.sleep(0.02) 
 
+def gstreamer_pipeline(
+    sensor_id=0,
+    capture_width=1280,
+    capture_height=720,
+    display_width=640,
+    display_height=360,
+    framerate=30,
+    flip_method=0,
+):
+    return (
+        "nvarguscamerasrc sensor-id=%d ! "
+        "video/x-raw(memory:NVMM), width=(int)%d, height=(int)%d, framerate=(fraction)%d/1 ! "
+        "nvvidconv flip-method=%d ! "
+        "video/x-raw, width=(int)%d, height=(int)%d, format=(string)BGRx ! "
+        "videoconvert ! "
+        "video/x-raw, format=(string)BGR ! appsink"
+        % (sensor_id, capture_width, capture_height, framerate, flip_method, display_width, display_height)
+    )
+
 # ==========================================
 # 5. [메인 스레드] 메인 실행 파트
 # ==========================================
@@ -192,10 +211,10 @@ if __name__ == "__main__":
     window_name = 'Future Makers - UGV02 Autonomous Driving'
     cv2.namedWindow(window_name)
 
-    # 젯슨 나노용 CSI 카메라 또는 일반 USB 카메라 연결
-    print("[알림] 카메라를 초기화 중입니다...")
-    # 만약 CSI 카메라를 사용하신다면 기존의 gstreamer_pipeline 코드로 복구하셔도 됩니다.
-    cap = cv2.VideoCapture(0)
+    # 젯슨 오린 나노 IMX219 CSI 카메라 연결
+    print("[알림] IMX219 CSI 카메라를 초기화 중입니다...")
+    pipeline = gstreamer_pipeline(flip_method=0)
+    cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
 
     if not cap.isOpened():
         print("[에러] 카메라를 열 수 없습니다!")
