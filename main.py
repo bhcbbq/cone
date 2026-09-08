@@ -29,28 +29,38 @@ def control_thread_task():
     print("[알림] 제어 백그라운드 스레드가 시작되었습니다.")
 
     while is_running:
-        current_time = time.time()
-        dt = current_time - last_time
-        if dt <= 0: dt = 0.001
-        last_time = current_time
+        try:
+            current_time = time.time()
+            dt = current_time - last_time
+            if dt <= 0: dt = 0.001
+            last_time = current_time
 
-        # 1. 시리얼 버퍼 비우기 (오도메트리 데이터 읽기 유지)
-        if ugv_serial:
-            ugv_control.read_odometry(ugv_serial, dt)
+            # 1. 시리얼 버퍼 비우기 (오도메트리 데이터 읽기 유지)
+            if ugv_serial:
+                ugv_control.read_odometry(ugv_serial, dt)
 
-        # 2. 최신 오차값 및 주행 속도 가져오기
-        with error_lock:
-            current_error = shared_error
-            current_speed = shared_speed
+            # 2. 최신 오차값 및 주행 속도 가져오기
+            with error_lock:
+                current_error = shared_error
+                current_speed = shared_speed
 
-        # 3. PID 조향 각속도 계산
-        angular_z = ugv_control.calculate_pid(current_error, previous_error, dt)
-        previous_error = current_error
+            # 3. PID 조향 각속도 계산
+            angular_z = ugv_control.calculate_pid(current_error, previous_error, dt)
+            previous_error = current_error
 
-        # 4. 하체로 주행 명령 하달 
-        if ugv_serial:
-            send_angular = angular_z if current_speed > 0 else 0.0
-            ugv_control.send_driving_command(ugv_serial, current_speed, send_angular)
+            # 4. 하체로 주행 명령 하달 
+            if ugv_serial:
+                send_angular = angular_z if current_speed > 0 else 0.0
+                ugv_control.send_driving_command(ugv_serial, current_speed, send_angular)
+
+        except Exception as e:
+            # 수정: 제어 스레드 내부에서 예상 못한 예외가 발생해도
+            # 스레드가 조용히 죽어버리지 않도록 방어하고, 안전을 위해 즉시 정지 명령을 내림
+            print(f"[에러] 제어 스레드에서 예외 발생, 안전 정지로 전환합니다: {e}")
+            with error_lock:
+                shared_speed = 0.0
+            if ugv_serial:
+                ugv_control.send_driving_command(ugv_serial, 0.0, 0.0)
 
         time.sleep(0.02)
 
