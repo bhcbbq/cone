@@ -108,7 +108,7 @@ if __name__ == "__main__":
     control_thread.start()
 
     window_name = 'Future Makers - UGV02 Autonomous Driving'
-    cv2.namedWindow(window_name)
+    # cv2.namedWindow(window_name) #ssh주석처리
 
     print("[알림] 카메라 및 자율주행 시스템이 정상 구동 중입니다. ('q'를 누르면 종료)")
 
@@ -148,11 +148,11 @@ if __name__ == "__main__":
                 else:
                     shared_speed = 0.0
 
-            cv2.imshow(window_name, result_image)
+            #cv2.imshow(window_name, result_image) #ssh 주석처리
 
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                print("[알림] 사용자가 'q'를 눌러 프로그램을 종료했습니다.")
-                break
+            #if cv2.waitKey(1) & 0xFF == ord('q'): #ssh 주석처리
+            #    print("[알림] 사용자가 'q'를 눌러 프로그램을 종료했습니다.") #ssh 주석처리
+            #    break  #ssh 주석처리
 
     except KeyboardInterrupt:
         print("\n[알림] 강제 종료되었습니다.")
