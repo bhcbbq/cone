@@ -6,7 +6,6 @@ import numpy as np
 # 모듈 임포트
 import lane_detection
 import ugv_control
-import hc12_comm
 
 # 기본 설정 및 스레드 간 데이터 공유 변수
 BASE_SPEED = 0.3  
@@ -15,22 +14,19 @@ shared_speed = 0.0
 error_lock = threading.Lock()
 is_running = True
 
-# 하드웨어 통신 변수 선언 (초기화는 아래 메인문에서 실행되도록 수정)
+# 하드웨어 통신 변수 선언
 ugv_serial = None
-hc12_serial = None
 
 # ==========================================
-# [백그라운드 스레드] 로봇 모터 제어 및 HC-12 통신
+# [백그라운드 스레드] 로봇 모터 제어
 # ==========================================
 def control_thread_task():
     global shared_error, shared_speed, is_running
     
-    total_distance = 0.0
     previous_error = 0
     last_time = time.time()
-    last_hc12_send_time = time.time()
 
-    print("[알림] 제어 및 통신 백그라운드 스레드가 시작되었습니다.")
+    print("[알림] 제어 백그라운드 스레드가 시작되었습니다.")
 
     while is_running:
         current_time = time.time()
@@ -38,9 +34,9 @@ def control_thread_task():
         if dt <= 0: dt = 0.001
         last_time = current_time
 
-        # 1. 엔코더 거리 누적
+        # 1. 시리얼 버퍼 비우기 (오도메트리 데이터 읽기 유지)
         if ugv_serial:
-            total_distance += ugv_control.read_odometry(ugv_serial, dt)
+            ugv_control.read_odometry(ugv_serial, dt)
 
         # 2. 최신 오차값 및 주행 속도 가져오기
         with error_lock:
@@ -55,11 +51,6 @@ def control_thread_task():
         if ugv_serial:
             send_angular = angular_z if current_speed > 0 else 0.0
             ugv_control.send_driving_command(ugv_serial, current_speed, send_angular)
-
-        # 5. HC-12 거리 데이터 발송 (1초 주기)
-        if hc12_serial and (current_time - last_hc12_send_time) >= 1.0:
-            hc12_comm.send_distance(hc12_serial, total_distance)
-            last_hc12_send_time = current_time
 
         time.sleep(0.02)
 
@@ -87,11 +78,8 @@ def gstreamer_pipeline(
 # ==========================================
 if __name__ == "__main__":
     
-    # 수정: 모듈 임포트 시 무단 연결 방지를 위해 메인문 내부로 하드웨어 초기화 위치 이동
     ugv_serial = ugv_control.init_ugv()
-    hc12_serial = hc12_comm.init_hc12()
 
-    # 1. 시리얼 연결 확인
     if not ugv_serial:
         print("[종료] UGV02가 연결되지 않아 프로그램을 종료합니다. 포트를 확인하세요.")
         exit()
@@ -108,7 +96,7 @@ if __name__ == "__main__":
     control_thread = threading.Thread(target=control_thread_task, daemon=True)
     control_thread.start()
 
-    # 수정: SSH 환경 사용을 위해 GUI 창 생성 코드 주석 처리
+    # SSH 환경 테스트를 위한 GUI 출력 관련 주석 유지
     # window_name = 'Future Makers - UGV02 Autonomous Driving'
     # cv2.namedWindow(window_name)
 
@@ -148,7 +136,6 @@ if __name__ == "__main__":
                 else:
                     shared_speed = 0.0
 
-            # 수정: SSH 환경 사용을 위해 GUI 출력 및 키보드 입력 코드 주석 처리
             # cv2.imshow(window_name, result_image)
             # if cv2.waitKey(1) & 0xFF == ord('q'):
             #     print("[알림] 사용자가 'q'를 눌러 프로그램을 종료했습니다.")
@@ -164,6 +151,5 @@ if __name__ == "__main__":
             control_thread.join(timeout=1.0)
         
         ugv_control.stop_ugv(ugv_serial)
-        hc12_comm.close_hc12(hc12_serial)
         cap.release()
         cv2.destroyAllWindows()
