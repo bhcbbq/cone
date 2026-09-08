@@ -19,19 +19,28 @@ def read_odometry(ser, dt):
     [거리 측정 함수] 바퀴 엔코더 값을 읽어와서 이동한 거리를 계산(시간 적분)합니다.
     """
     distance_added = 0.0
+    latest_speed = 0.0
+    has_data = False
+    
     while ser and ser.in_waiting > 0:
         try:
-            raw_data = ser.readline().decode('utf-8').strip()
+            # 수정: 노이즈(Garbage byte)로 인한 시스템 다운 방지 (errors='ignore' 추가)
+            raw_data = ser.readline().decode('utf-8', errors='ignore').strip()
             if not raw_data: continue
             
             feedback = json.loads(raw_data)
             if feedback.get("T") == 1001: 
                 left_speed = feedback.get("L", 0.0)
                 right_speed = feedback.get("R", 0.0)
-                real_speed = (left_speed + right_speed) / 2.0
-                distance_added += real_speed * dt
+                latest_speed = (left_speed + right_speed) / 2.0
+                has_data = True
         except json.JSONDecodeError:
             pass
+            
+    # 수정: 버퍼를 다 비우고 최신 속도값으로 한 번만 거리 계산 (중복 누적 버그 해결)
+    if has_data:
+        distance_added = latest_speed * dt
+        
     return distance_added
 
 def calculate_pid(current_error, previous_error, dt, Kp=0.005, Kd=0.002):
