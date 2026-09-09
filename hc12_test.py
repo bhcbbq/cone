@@ -1,10 +1,6 @@
 import serial
 
-hc12 = serial.Serial(
-    '/dev/ttyTHS1',
-    9600,
-    timeout=2
-)
+hc12 = serial.Serial('/dev/ttyTHS1', 9600, timeout=2)
 
 print("HC12 TEST")
 
