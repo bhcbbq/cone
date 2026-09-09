@@ -2,7 +2,7 @@ import serial
 import threading
 
 hc12 = serial.Serial(
-    '/dev/ttyTHS2',
+    '/dev/ttyTHS1',
     115200,
     timeout=0.1
 )
