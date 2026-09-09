@@ -27,7 +27,6 @@ def show_camera():
     pipeline = gstreamer_pipeline(sensor_id=0)
     print("Using pipeline:", pipeline)
     
-    # GStreamer 백엔드를 명시하여 VideoCapture 생성
     cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
     
     if not cap.isOpened():
@@ -35,13 +34,16 @@ def show_camera():
         return
 
     print("카메라가 열렸습니다. 종료하려면 'q'를 누르세요.")
-    while cv2.isWaitKey(1) < 0:
+    
+    while True:
         ret, frame = cap.read()
         if not ret:
             print("프레임을 읽지 못했습니다.")
             break
             
+        print("프레임 정상 수신 중...")
         cv2.imshow("CSI Camera", frame)
+        
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
