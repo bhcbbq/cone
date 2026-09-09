@@ -1,18 +1,13 @@
 import serial
-import threading
+import time
 
 hc12 = serial.Serial('/dev/ttyTHS1', 115200, timeout=0.1)
 
-def recv():
-    while True:
-        line = hc12.readline().decode('utf-8', errors='ignore').strip()
-        if line:
-            print("\nRX:", line)
-            print("SEND >", end=" ", flush=True)
-
-threading.Thread(target=recv, daemon=True).start()
+print("HC12 RAW TEST")
 
 while True:
-    text = input("SEND > ")
-    hc12.write((text + '\n').encode())
-    hc12.flush()
+    if hc12.in_waiting:
+        data = hc12.read(hc12.in_waiting)
+        print("RX RAW:", repr(data))
+
+    time.sleep(0.01)
