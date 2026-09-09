@@ -1,10 +1,10 @@
 import serial
 
-hc12 = serial.Serial('/dev/ttyTHS1', 115200, timeout=1)
+hc12 = serial.Serial('/dev/ttyTHS1', 9600, timeout=2)
 
-print("HC12 READY")
+print("HC12 TEST")
 
 while True:
-    line = hc12.readline().decode('utf-8', errors='ignore').strip()
-    if line:
-        print("RX:", line)
+    data = hc12.readline()
+    if data:
+        print("RX:", repr(data))
