@@ -1,15 +1,22 @@
 import serial
+import time
 
-hc12 = serial.Serial(
-    '/dev/ttyTHS1',
-    9600,
-    timeout=2
-)
+ser = serial.Serial('/dev/ttyTHS1', 9600, timeout=1)
 
-print("HC12 TEST")
+time.sleep(1)
 
-while True:
-    data = hc12.readline()
+ser.reset_input_buffer()
 
-    if data:
-        print("RX:", repr(data))
+test = b'HELLO12345678\n'
+
+ser.write(test)
+ser.flush()
+
+time.sleep(0.2)
+
+data = ser.read(100)
+
+print("SENT:", repr(test))
+print("RECV:", repr(data))
+
+ser.close()
