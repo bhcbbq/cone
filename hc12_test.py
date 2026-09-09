@@ -2,7 +2,7 @@ import serial
 
 hc12 = serial.Serial(
     '/dev/ttyTHS1',
-    115200,
+    9600,
     timeout=2
 )
 
