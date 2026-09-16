@@ -232,16 +232,21 @@ try:
             # -----------------------------
             if '"T":2102' in line:
 
-                running = False
+    running = False
 
-                print("ARRIVED")
+    # 도착 즉시 확실하게 정지 명령
+    ugv.write(
+        b'{"T":1,"L":0.0,"R":0.0}\n'
+    )
+    ugv.flush()
 
-                # 외부 ESP32에도 도착 전달
-                hc12.write(
-                    b'ARRIVED\n'
-                )
+    print("ARRIVED - UGV STOP")
 
-                hc12.flush()
+    # ESP32에도 도착 전달
+    hc12.write(
+        b'ARRIVED\n'
+    )
+    hc12.flush()
 
 
         time.sleep(0.2)
