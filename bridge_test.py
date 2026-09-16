@@ -1,6 +1,7 @@
 import serial
 import threading
 import time
+import json
 
 # =========================
 # SERIAL SETTINGS
@@ -29,7 +30,7 @@ ugv = serial.Serial(
     timeout=0.05
 )
 
-print("BRIDGE TEST READY")
+print("BRIDGE READY")
 print("HC12 :", HC12_PORT, HC12_BAUD)
 print("UGV  :", UGV_PORT, UGV_BAUD)
 
@@ -41,14 +42,22 @@ print("UGV  :", UGV_PORT, UGV_BAUD)
 running = False
 stop_flag = False
 
+start_odl = None
+start_odr = None
+
+target_distance = None
+
 
 # =========================
-# HC-12 RECEIVE THREAD
+# HC12 RECEIVE
 # =========================
 
 def hc12_receive():
     global running
     global stop_flag
+    global start_odl
+    global start_odr
+    global target_distance
 
     buffer = ""
 
@@ -65,7 +74,6 @@ def hc12_receive():
 
             for c in text:
 
-                # 한 줄 명령 완성
                 if c == '\n':
 
                     cmd = buffer.strip()
@@ -76,19 +84,28 @@ def hc12_receive():
 
                     print("\nHC12 RX:", cmd)
 
-                    # -------------------------
+
+                    # =====================
                     # START
-                    # -------------------------
+                    # =====================
+
                     if cmd == "START":
 
                         running = True
 
                         print("UGV START")
 
+                        hc12.write(
+                            b'DRIVING\n'
+                        )
 
-                    # -------------------------
+                        hc12.flush()
+
+
+                    # =====================
                     # STOP
-                    # -------------------------
+                    # =====================
+
                     elif cmd == "STOP":
 
                         running = False
@@ -101,10 +118,17 @@ def hc12_receive():
 
                         print("UGV STOP")
 
+                        hc12.write(
+                            b'STOPPED\n'
+                        )
 
-                    # -------------------------
+                        hc12.flush()
+
+
+                    # =====================
                     # EMERGENCY STOP
-                    # -------------------------
+                    # =====================
+
                     elif cmd == "EMERGENCY_STOP":
 
                         running = False
@@ -117,11 +141,19 @@ def hc12_receive():
 
                         print("UGV EMERGENCY STOP")
 
+                        hc12.write(
+                            b'EMERGENCY\n'
+                        )
 
-                    # -------------------------
-                    # TARGET DISTANCE
-                    # ex) TARGET:0.30
-                    # -------------------------
+                        hc12.flush()
+
+
+                    # =====================
+                    # TARGET
+                    # ex)
+                    # TARGET:0.20
+                    # =====================
+
                     elif cmd.startswith("TARGET:"):
 
                         try:
@@ -131,8 +163,12 @@ def hc12_receive():
                             )
 
                             if distance <= 0:
+
                                 print("INVALID TARGET")
+
                                 continue
+
+                            target_distance = distance
 
                             message = (
                                 '{"T":2101,"d":'
@@ -146,11 +182,22 @@ def hc12_receive():
 
                             ugv.flush()
 
+                            # 다음 T2100 값을
+                            # 이번 주행 기준점으로 사용
+                            start_odl = None
+                            start_odr = None
+
                             print(
                                 "TARGET SENT:",
                                 distance,
                                 "m"
                             )
+
+                            hc12.write(
+                                f"TARGET:{distance:.2f}\n".encode()
+                            )
+
+                            hc12.flush()
 
                         except ValueError:
 
@@ -158,6 +205,24 @@ def hc12_receive():
                                 "INVALID TARGET:",
                                 cmd
                             )
+
+
+                    # =====================
+                    # RESET DISTANCE
+                    # =====================
+
+                    elif cmd == "RESET_DISTANCE":
+
+                        start_odl = None
+                        start_odr = None
+
+                        print("DISTANCE RESET")
+
+                        hc12.write(
+                            b'DISTANCE:0.00\n'
+                        )
+
+                        hc12.flush()
 
 
                     else:
@@ -196,11 +261,10 @@ try:
 
     while True:
 
-        # ---------------------------------
-        # UGV DRIVE
-        # ---------------------------------
-        # heartbeat 때문에 START 상태에서는
-        # 계속 속도 명령 전송
+        # =====================
+        # DRIVE
+        # =====================
+
         if running:
 
             ugv.write(
@@ -210,9 +274,10 @@ try:
             ugv.flush()
 
 
-        # ---------------------------------
+        # =====================
         # UGV RECEIVE
-        # ---------------------------------
+        # =====================
+
         while ugv.in_waiting:
 
             line = ugv.readline().decode(
@@ -226,26 +291,95 @@ try:
             print("UGV RX:", line)
 
 
-            # -----------------------------
+            # =====================
+            # T2100
+            # ENCODER DISTANCE
+            # =====================
+
+            if line.startswith('{"T":2100'):
+
+                try:
+
+                    data = json.loads(line)
+
+                    odl = float(
+                        data["odl"]
+                    )
+
+                    odr = float(
+                        data["odr"]
+                    )
+
+                    # T2100은 cm 단위
+                    # 첫 값을 이번 주행 기준점으로 저장
+                    if start_odl is None:
+                        start_odl = odl
+
+                    if start_odr is None:
+                        start_odr = odr
+
+                    delta_l = odl - start_odl
+                    delta_r = odr - start_odr
+
+                    distance_cm = (
+                        delta_l + delta_r
+                    ) / 2.0
+
+                    distance_m = (
+                        distance_cm / 100.0
+                    )
+
+                    if distance_m < 0:
+                        distance_m = 0.0
+
+                    msg = (
+                        f"DISTANCE:{distance_m:.2f}\n"
+                    )
+
+                    hc12.write(
+                        msg.encode('utf-8')
+                    )
+
+                    hc12.flush()
+
+                    print(
+                        "CURRENT DISTANCE:",
+                        f"{distance_m:.2f}",
+                        "m"
+                    )
+
+                except Exception as e:
+
+                    print(
+                        "DISTANCE ERROR:",
+                        e
+                    )
+
+
+            # =====================
+            # T2102
             # ARRIVED
-            # T2102 = target distance reached
-            # -----------------------------
-            if '"T":2102' in line:
+            # =====================
+
+            elif '"T":2102' in line:
 
                 running = False
 
-                # 도착 즉시 확실하게 정지 명령
+                # 도착 후 확실하게 STOP
                 ugv.write(
                     b'{"T":1,"L":0.0,"R":0.0}\n'
                 )
+
                 ugv.flush()
 
-                print("ARRIVED - UGV STOP")
+                print(
+                    "ARRIVED - UGV STOP"
+                )
 
-                # ESP32에도 도착 전달
                 hc12.write(
                     b'ARRIVED\n'
                 )
+
                 hc12.flush()
 
 
@@ -253,7 +387,7 @@ try:
 
 
 # =========================
-# CTRL+C
+# CTRL + C
 # =========================
 
 except KeyboardInterrupt:
@@ -263,7 +397,6 @@ except KeyboardInterrupt:
     stop_flag = True
     running = False
 
-    # 안전하게 정지
     try:
 
         ugv.write(
