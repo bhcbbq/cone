@@ -2,14 +2,18 @@ import serial
 import threading
 import time
 
+# -------------------------
 # HC-12
+# -------------------------
 hc12 = serial.Serial(
     '/dev/ttyTHS1',
     115200,
     timeout=0.05
 )
 
-# UGV02 USB
+# -------------------------
+# UGV USB
+# -------------------------
 ugv = serial.Serial(
     '/dev/ttyACM0',
     115200,
@@ -19,20 +23,28 @@ ugv = serial.Serial(
 print("BRIDGE TEST READY")
 
 running = False
+stop_flag = False
 
 
 def hc12_receive():
-    global running
+    global running, stop_flag
 
     buffer = ""
 
-    while True:
+    while not stop_flag:
+
         if hc12.in_waiting:
             data = hc12.read(hc12.in_waiting)
-            text = data.decode('utf-8', errors='ignore')
+
+            text = data.decode(
+                'utf-8',
+                errors='ignore'
+            )
 
             for c in text:
+
                 if c == '\n':
+
                     cmd = buffer.strip()
                     buffer = ""
 
@@ -61,24 +73,30 @@ def hc12_receive():
         time.sleep(0.001)
 
 
-threading.Thread(
+thread = threading.Thread(
     target=hc12_receive,
     daemon=True
-).start()
+)
+
+thread.start()
 
 
 try:
+
     while True:
 
-        # START 상태면 heartbeat 때문에 계속 속도 명령 전송
+        # START 상태면 0.2초마다 계속 전진 명령
         if running:
+
             ugv.write(
                 b'{"T":1,"L":0.5,"R":0.5}\n'
             )
+
             ugv.flush()
 
-        # UGV가 보내는 데이터 확인
-        if ugv.in_waiting:
+        # UGV 데이터 수신
+        while ugv.in_waiting:
+
             line = ugv.readline().decode(
                 'utf-8',
                 errors='ignore'
@@ -89,13 +107,24 @@ try:
 
         time.sleep(0.2)
 
+
 except KeyboardInterrupt:
+
+    print("\nSTOPPING...")
+
+    stop_flag = True
+    running = False
+
+    # 종료 전에 UGV 정지
     ugv.write(
         b'{"T":1,"L":0.0,"R":0.0}\n'
     )
+
     ugv.flush()
+
+    time.sleep(0.2)
 
     hc12.close()
     ugv.close()
 
-    print("\nSTOPPED")
+    print("STOPPED")
