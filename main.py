@@ -6,6 +6,8 @@ import numpy as np
 # 모듈 임포트
 import lane_detection
 import ugv_control
+import obstacle_avoidance
+
 
 # 기본 설정 및 스레드 간 데이터 공유 변수
 BASE_SPEED = 0.3  
@@ -13,6 +15,17 @@ shared_error = 0
 shared_speed = 0.0          
 error_lock = threading.Lock()
 is_running = True
+
+# [추가] 회피 주행 상태 머신(State Machine) 정의
+STATE_LANE_FOLLOWING = 0  # 정상 차선 추종
+STATE_STOP = 1            # 장애물 감지 시 1초 정지
+STATE_AVOID_BYPASS = 2    # 우측 우회 주행
+STATE_AVOID_RETURN = 3    # 대각선 좌측 차선 복귀
+
+current_state = STATE_LANE_FOLLOWING
+state_timer = 0
+OBSTACLE_THRESHOLD = 25.0  # 장애물 감지 거리 (cm 단위, 필요시 조정)
+
 # [추가] 영상 지연/제어 오류가 나면 재실행 전까지 주행 금지
 FRAME_TIMEOUT = 0.5  # 초. 실제 영상 처리 시간을 확인해 조정
 STARTUP_TIMEOUT = 5.0  # 카메라 개방 후 첫 영상 대기 제한
@@ -115,6 +128,8 @@ def gstreamer_pipeline(
 if __name__ == "__main__":
     
     ugv_serial = ugv_control.init_ugv()
+    # [추가] 초음파 센서 GPIO 초기화
+    obstacle_avoidance.init_ultrasonic()
 
     if not ugv_serial:
         print("[종료] UGV02가 연결되지 않아 프로그램을 종료합니다. 포트를 확인하세요.")
@@ -177,16 +192,55 @@ if __name__ == "__main__":
 
             error, result_image, is_detected = lane_detection.calculate_steering(frame.copy(), lines)
 
+          # 2. 초음파 센서 거리 측정
+            distance = obstacle_avoidance.get_distance()
+            now = time.monotonic()
+
+            # 3. 장애물 감지 및 회피 상태 머신 제어
+            if current_state == STATE_LANE_FOLLOWING:
+                if distance <= OBSTACLE_THRESHOLD:
+                    print(f"[경고] 장애물 감지! 거리: {distance}cm -> 일단 정지")
+                    current_state = STATE_STOP
+                    state_timer = now
+
+            elif current_state == STATE_STOP:
+                if now - state_timer > 1.0:
+                    print("[회피] 우측으로 우회 회피 주행 시작")
+                    current_state = STATE_AVOID_BYPASS
+                    state_timer = now
+
+            elif current_state == STATE_AVOID_BYPASS:
+                if now - state_timer > 1.2:
+                    print("[복귀] 차선 방향(좌측)으로 복귀 진입")
+                    current_state = STATE_AVOID_RETURN
+                    state_timer = now
+
+            elif current_state == STATE_AVOID_RETURN:
+                if is_detected or (now - state_timer > 1.2):
+                    print("[완료] 정상 차선 추종 주행으로 복귀합니다.")
+                    current_state = STATE_LANE_FOLLOWING
+
+            # 4. 기존 with error_lock: 구문을 대체(수정)한 부분
             with error_lock:
                 if not is_running or control_fault.is_set():
                     break
                 shared_frame_time = frame_time
-                shared_error = error
-                if is_detected:
-                    shared_speed = BASE_SPEED
-                else:
+
+                if current_state == STATE_LANE_FOLLOWING:
+                    shared_error = error
+                    shared_speed = BASE_SPEED if is_detected else 0.0
+
+                elif current_state == STATE_STOP:
+                    shared_error = 0
                     shared_speed = 0.0
 
+                elif current_state == STATE_AVOID_BYPASS:
+                    shared_error = 120   # 우측으로 회전
+                    shared_speed = 0.25  # 서행
+
+                elif current_state == STATE_AVOID_RETURN:
+                    shared_error = -120  # 좌측으로 회전
+                    shared_speed = 0.25
             # cv2.imshow(window_name, result_image)
             # if cv2.waitKey(1) & 0xFF == ord('q'):
             #     print("[알림] 사용자가 'q'를 눌러 프로그램을 종료했습니다.")
@@ -197,6 +251,8 @@ if __name__ == "__main__":
         
     finally:
         print("[알림] 시스템을 안전하게 종료합니다.")
+        # [추가] GPIO 핀 리소스 정리
+        obstacle_avoidance.cleanup()
         with error_lock:
             shared_speed = 0.0
             is_running = False
