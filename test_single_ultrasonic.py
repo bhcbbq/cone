@@ -16,34 +16,34 @@ GPIO.output(TRIG_PIN, GPIO.LOW)
 time.sleep(0.5)
 
 print("========================================")
-print("  AJ-SR04M 정밀 초음파 테스트 시작 ")
+print("  AJ-SR04M 정밀 초음파 테스트 시작 (Edge 감지) ")
 print("========================================")
 
 try:
     while True:
-        # 1. Trig 신호 전송 (10us)
+        # 1. Trig 신호 전송
         GPIO.output(TRIG_PIN, GPIO.HIGH)
-        time.sleep(0.00001)  # 10 microseconds
+        time.sleep(0.00001)  # 10us
         GPIO.output(TRIG_PIN, GPIO.LOW)
 
-        # 2. Echo 신호 수신 대기 (타임아웃 처리)
+        # 2. Echo 신호 대기 (Edge 감지 방식)
+        # 0.1초 동안 Echo 핀의 RISING(0->1) 상태 변화 대기
+        if not GPIO.wait_for_edge(ECHO_PIN, GPIO.RISING, timeout=100):
+            print("[에러] Echo 신호 인식 실패 (Timeout)")
+            time.sleep(0.5)
+            continue
+        
+        # Echo 신호 수신 시작 시점
         pulse_start = time.time()
-        timeout_start = pulse_start
 
-        # Echo가 HIGH가 될 때까지 대기
-        while GPIO.input(ECHO_PIN) == 0:
-            pulse_start = time.time()
-            if pulse_start - timeout_start > 0.1:  # 0.1초 넘으면 타임아웃
-                break
+        # 0.1초 동안 Echo 핀의 FALLING(1->0) 상태 변화 대기
+        if not GPIO.wait_for_edge(ECHO_PIN, GPIO.FALLING, timeout=100):
+            print("[에러] Echo 신호 수신 실패 (Timeout)")
+            time.sleep(0.5)
+            continue
 
-        # Echo가 LOW가 될 때까지 대기
+        # Echo 신호 수신 종료 시점
         pulse_end = time.time()
-        timeout_end = pulse_end
-
-        while GPIO.input(ECHO_PIN) == 1:
-            pulse_end = time.time()
-            if pulse_end - timeout_end > 0.1:
-                break
 
         # 3. 거리 계산
         pulse_duration = pulse_end - pulse_start
