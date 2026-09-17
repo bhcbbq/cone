@@ -1,74 +1,63 @@
 import Jetson.GPIO as GPIO
 import time
 
-# BOARD 핀 번호 설정 (물리 핀 번호 기준)
-TRIG_PIN = 29  # Jetson Pin 29
-ECHO_PIN = 22  # Jetson Pin 22
+# 핀 번호 설정 (BOARD 핀 번호 기준)
+TRIG_PIN = 29
+ECHO_PIN = 22
 
-def setup():
-    """GPIO 핀 초기화"""
-    GPIO.setmode(GPIO.BOARD)
-    GPIO.setup(TRIG_PIN, GPIO.OUT, initial=GPIO.LOW)
-    GPIO.setup(ECHO_PIN, GPIO.IN)
-    time.sleep(0.5)  # 센서 안정화 대기
+GPIO.setwarnings(False)
+GPIO.setmode(GPIO.BOARD)
 
-def measure_distance():
-    """초음파 센서로부터 거리를 측정 (단위: cm)"""
-    # 10us 동안 High 신호를 주어 초음파 발사
-    GPIO.output(TRIG_PIN, GPIO.HIGH)
-    time.sleep(0.00001)
-    GPIO.output(TRIG_PIN, GPIO.LOW)
+GPIO.setup(TRIG_PIN, GPIO.OUT)
+GPIO.setup(ECHO_PIN, GPIO.IN)
 
-    pulse_start = time.time()
-    pulse_end = time.time()
-    
-    # 무한 루프 방지를 위한 타임아웃 설정 (0.03초 = 약 5m 측정 범위 limit)
-    timeout = time.time() + 0.03
+# 초기 신호 LOW 설정
+GPIO.output(TRIG_PIN, GPIO.LOW)
+time.sleep(0.5)
 
-    # Echo 핀이 High로 바뀔 때까지 대기 (신호 발사 시점)
-    while GPIO.input(ECHO_PIN) == 0:
+print("========================================")
+print("  AJ-SR04M 정밀 초음파 테스트 시작 ")
+print("========================================")
+
+try:
+    while True:
+        # 1. Trig 신호 전송 (10us)
+        GPIO.output(TRIG_PIN, GPIO.HIGH)
+        time.sleep(0.00001)  # 10 microseconds
+        GPIO.output(TRIG_PIN, GPIO.LOW)
+
+        # 2. Echo 신호 수신 대기 (타임아웃 처리)
         pulse_start = time.time()
-        if pulse_start > timeout:
-            return None
+        timeout_start = pulse_start
 
-    # Echo 핀이 Low로 바뀔 때까지 대기 (신호 반사 수신 시점)
-    while GPIO.input(ECHO_PIN) == 1:
+        # Echo가 HIGH가 될 때까지 대기
+        while GPIO.input(ECHO_PIN) == 0:
+            pulse_start = time.time()
+            if pulse_start - timeout_start > 0.1:  # 0.1초 넘으면 타임아웃
+                break
+
+        # Echo가 LOW가 될 때까지 대기
         pulse_end = time.time()
-        if pulse_end > timeout:
-            return None
+        timeout_end = pulse_end
 
-    # 왕복 시간 계산 후 음속(343m/s) 기준 거리 계산
-    pulse_duration = pulse_end - pulse_start
-    distance = (pulse_duration * 34300) / 2
-    return round(distance, 2)
+        while GPIO.input(ECHO_PIN) == 1:
+            pulse_end = time.time()
+            if pulse_end - timeout_end > 0.1:
+                break
 
-def main():
-    setup()
-    print("========================================")
-    print("  AJ-SR04M 초음파 센서 단독 테스트 시작 ")
-    print("  (종료하려면 Ctrl+C 를 누르세요)       ")
-    print("========================================")
+        # 3. 거리 계산
+        pulse_duration = pulse_end - pulse_start
+        distance = pulse_duration * 17150  # 음속 (34300cm/s) / 2
 
-    try:
-        while True:
-            dist = measure_distance()
-            
-            if dist is None:
-                print("[경고] 측정 범위 초과 또는 신호 수신 실패")
-            else:
-                # 30cm 이내 장애물 감지 시 경고 문구 출력
-                if dist <= 30.0:
-                    print(f"거리: {dist} cm  ---> [!! 장애물 감지 !!]")
-                else:
-                    print(f"거리: {dist} cm")
-            
-            time.sleep(0.2)
+        if 20 <= distance <= 450:
+            print(f"측정 거리: {distance:.2f} cm")
+        else:
+            print(f"[알림] 측정값: {distance:.2f} cm (센서 최소 20cm 이상 유지 필요)")
 
-    except KeyboardInterrupt:
-        print("\n테스트를 종료합니다.")
-    finally:
-        GPIO.cleanup()  # GPIO 핀 초기화
+        # AJ-SR04M 센서는 주기 간격이 최소 0.2~0.3초 필요함
+        time.sleep(0.3)
 
-if __name__ == "__main__":
-    main()
-    
+except KeyboardInterrupt:
+    print("\n테스트를 종료합니다.")
+finally:
+    GPIO.cleanup()
