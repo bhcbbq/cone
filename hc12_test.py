@@ -1,7 +1,7 @@
 import serial
 import threading
 import time
-
+/a
 PORT = '/dev/ttyTHS1'
 BAUD = 115200
 
