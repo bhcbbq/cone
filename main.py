@@ -158,8 +158,8 @@ if __name__ == "__main__":
         raise
 
     # SSH 환경 테스트를 위한 GUI 출력 관련 주석 유지
-    # window_name = 'Future Makers - UGV02 Autonomous Driving'
-    # cv2.namedWindow(window_name)
+    window_name = 'Future Makers - UGV02 Autonomous Driving'
+    cv2.namedWindow(window_name)
 
     print("[알림] 카메라 및 자율주행 시스템이 정상 구동 중입니다. (강제 종료는 Ctrl+C)")
 
@@ -241,10 +241,11 @@ if __name__ == "__main__":
                 elif current_state == STATE_AVOID_RETURN:
                     shared_error = -120  # 좌측으로 회전
                     shared_speed = 0.25
-            # cv2.imshow(window_name, result_image)
-            # if cv2.waitKey(1) & 0xFF == ord('q'):
-            #     print("[알림] 사용자가 'q'를 눌러 프로그램을 종료했습니다.")
-            #     break
+            # ssh 카메라 코드
+            cv2.imshow(window_name, result_image)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                 print("[알림] 사용자가 'q'를 눌러 프로그램을 종료했습니다.")
+                 break
 
     except KeyboardInterrupt:
         print("\n[알림] 강제 종료(Ctrl+C) 신호를 감지했습니다.")
