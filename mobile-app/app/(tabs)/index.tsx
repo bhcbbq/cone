@@ -603,7 +603,7 @@ export default function HomeScreen() {
     // 이번 구간의 목표 거리 전송
     const distanceSent =
       await sendCommand(
-        `DIST:${distanceToSend}`
+        `TARGET:${distanceToSend}`
       );
 
     if (!distanceSent) {
