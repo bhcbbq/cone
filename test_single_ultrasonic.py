@@ -2,7 +2,7 @@ import Jetson.GPIO as GPIO
 import time
 
 TRIG_PIN = 29
-ECHO_PIN = 22
+ECHO_PIN = 18
 
 GPIO.setwarnings(False)
 GPIO.setmode(GPIO.BOARD)
@@ -19,7 +19,7 @@ print("========================================")
 
 try:
     while True:
-        # 1. Trig 신호 10us 출력
+        # 1. Trig 신호 10us
         GPIO.output(TRIG_PIN, GPIO.HIGH)
         time.sleep(0.00001)
         GPIO.output(TRIG_PIN, GPIO.LOW)
