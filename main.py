@@ -1,3 +1,74 @@
+import cv2
+import time
+import threading
+import numpy as np
+
+# 모듈 임포트
+import lane_detection
+import ugv_control
+
+# 기본 설정 및 스레드 간 데이터 공유 변
+BASE_SPEED = 0.3  
+shared_error = 0            
+shared_speed = 0.0          
+error_lock = threading.Lock()
+is_running = True
+
+# 하드웨어 통신 변수 선언
+ugv_serial = None
+
+# ==========================================
+# [백그라운드 스레드] 로봇 모터 제어
+# ==========================================
+def control_thread_task():
+    global shared_error, shared_speed, is_running
+    
+    previous_error = 0
+    last_time = time.time()
+
+    print("[알림] 제어 백그라운드 스레드가 시작되었습니다.")
+
+    while is_running:
+        current_time = time.time()
+        dt = current_time - last_time
+        if dt <= 0: dt = 0.001
+        last_time = current_time
+
+        # 1. 시리얼 버퍼 비우기 (오도메트리 데이터 읽기 유지)
+        if ugv_serial:
+            ugv_control.read_odometry(ugv_serial, dt)
+
+        # 2. 최신 오차값 및 주행 속도 가져오기
+        with error_lock:
+            current_error = shared_error
+            current_speed = shared_speed
+
+        # 3. PID 조향 각속도 계산
+        angular_z = ugv_control.calculate_pid(current_error, previous_error, dt)
+        previous_error = current_error
+
+        # 4. 하체로 주행 명령 하달 
+        if ugv_serial:
+            send_angular = angular_z if current_speed > 0 else 0.0
+            ugv_control.send_driving_command(ugv_serial, current_speed, send_angular)
+
+        time.sleep(0.02)
+
+def gstreamer_pipeline(
+    sensor_id=0,
+    capture_width=1280,
+    capture_height=720,
+    display_width=640,
+    display_height=360,
+    framerate=30,
+    flip_method=0,
+):
+    return (
+        "nvarguscamerasrc sensor-id=%d ! "
+        "video/x-raw(memory:NVMM), width=(int)%d, height=(int)%d, framerate=(fraction)%d/1 ! "
+        "nvvidconv flip-method=%d ! "
+        "video/x-raw, width=(int)%d, height=(int)%d, format=(string)BGRx ! "
+        "videoconvert ! "
         "video/x-raw, format=(string)BGR ! appsink"
         % (sensor_id, capture_width, capture_height, framerate, flip_method, display_width, display_height)
     )
@@ -26,8 +97,8 @@ if __name__ == "__main__":
     control_thread.start()
 
     # SSH 환경 테스트를 위한 GUI 출력 관련 주석 유지
-    window_name = 'Future Makers - UGV02 Autonomous Driving'
-    cv2.namedWindow(window_name)
+    # window_name = 'Future Makers - UGV02 Autonomous Driving'
+    # cv2.namedWindow(window_name)
 
     print("[알림] 카메라 및 자율주행 시스템이 정상 구동 중입니다. (강제 종료는 Ctrl+C)")
 
@@ -66,9 +137,9 @@ if __name__ == "__main__":
                     shared_speed = 0.0
 
             # cv2.imshow(window_name, result_image)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                 print("[알림] 사용자가 'q'를 눌러 프로그램을 종료했습니다.")
-                 break
+            # if cv2.waitKey(1) & 0xFF == ord('q'):
+            #     print("[알림] 사용자가 'q'를 눌러 프로그램을 종료했습니다.")
+            #     break
 
     except KeyboardInterrupt:
         print("\n[알림] 강제 종료(Ctrl+C) 신호를 감지했습니다.")
