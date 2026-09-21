@@ -1,37 +1,43 @@
 import serial
+import threading
 import time
 
-PORT = "/dev/ttyTHS1"
+PORT = '/dev/ttyTHS1'
 BAUD = 115200
 
-hc12 = serial.Serial(
-    PORT,
-    BAUD,
-    timeout=0.1
-)
+hc12 = serial.Serial(PORT, BAUD, timeout=0.05)
 
-print("JETSON HC12 RECEIVE TEST")
-print("PORT:", PORT)
-print("BAUD:", BAUD)
-print("waiting...\n")
-
-try:
+def receive_loop():
     while True:
         if hc12.in_waiting > 0:
             data = hc12.read(hc12.in_waiting)
 
-            print("RX RAW:", repr(data))
+            if data:
+                text = data.decode(
+                    'utf-8',
+                    errors='ignore'
+                )
 
-            try:
-                print("RX TEXT:", data.decode("utf-8"))
-            except:
-                pass
+                print(f"\nRX: {text}", end="", flush=True)
+                print("SEND > ", end="", flush=True)
 
-        time.sleep(0.01)
+        time.sleep(0.001)
 
-except KeyboardInterrupt:
-    pass
+def send_loop():
+    while True:
+        text = input("SEND > ")
 
-finally:
-    hc12.close()
-    print("CLOSED")
+        if text:
+            hc12.write(
+                (text + '\n').encode()
+            )
+            hc12.flush()
+
+            print("TX:", text)
+
+threading.Thread(
+    target=receive_loop,
+    daemon=True
+).start()
+
+send_loop()
