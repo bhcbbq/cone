@@ -5,7 +5,7 @@ import Jetson.GPIO as GPIO
 
 # Jetson Orin Nano 40핀 헤더의 물리적 핀 번호
 TRIG_PIN = 29
-ECHO_PIN = 31
+ECHO_PIN = 18
 
 SPEED_OF_SOUND = 34300  # cm/s
 TIMEOUT = 0.05
