@@ -4,7 +4,7 @@ import Jetson.GPIO as GPIO
 
 
 OUTPUT_PIN = 29  # WAT LV1에 연결
-INPUT_PIN = 31   # WAT LV2에 연결
+INPUT_PIN = 18   # WAT LV2에 연결
 
 
 GPIO.setmode(GPIO.BOARD)
