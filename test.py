@@ -1,28 +1,30 @@
 import Jetson.GPIO as GPIO
 import time
 
-ECHO = 16
+TRIG = 12
 
 GPIO.setmode(GPIO.BOARD)
-GPIO.setup(ECHO, GPIO.IN)
+GPIO.setup(TRIG, GPIO.OUT, initial=GPIO.LOW)
 
-print("ECHO 평상시 상태 테스트")
-print("10초 동안 ECHO 상태를 확인합니다.")
-print()
+print("TRIG 테스트 시작")
+print("10번의 트리거 신호를 보냅니다.")
 
 try:
-    for i in range(100):
-        state = GPIO.input(ECHO)
+    for i in range(10):
+        print("TRIG 신호 {} / 10".format(i + 1))
 
-        if state == GPIO.HIGH:
-            print("ECHO = HIGH")
-        else:
-            print("ECHO = LOW")
+        GPIO.output(TRIG, GPIO.LOW)
+        time.sleep(0.000002)
+
+        GPIO.output(TRIG, GPIO.HIGH)
+        time.sleep(0.000020)
+
+        GPIO.output(TRIG, GPIO.LOW)
 
         time.sleep(0.1)
 
-except KeyboardInterrupt:
-    pass
-
 finally:
+    GPIO.output(TRIG, GPIO.LOW)
     GPIO.cleanup()
+
+print("테스트 종료")
