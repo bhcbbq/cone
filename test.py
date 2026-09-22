@@ -10,52 +10,54 @@ GPIO.setup(TRIG_PIN, GPIO.OUT, initial=GPIO.LOW)
 GPIO.setup(ECHO_PIN, GPIO.IN)
 
 print("==============================")
-print(" JSN-SR04T 초음파 센서 테스트")
+print(" JSN-SR04T 거리 측정 테스트")
 print("==============================")
-print("TRIG : 물리 핀 12번")
-print("ECHO : 물리 핀 16번")
+print("TRIG : Pin 12")
+print("ECHO : Pin 16")
 print("종료 : Ctrl + C")
 print()
 
 try:
     while True:
 
-        # 초음파 발사
+        # 이전 ECHO 신호가 끝날 때까지 잠시 대기
+        time.sleep(0.05)
+
+        # TRIG 10us 펄스
         GPIO.output(TRIG_PIN, GPIO.LOW)
-        time.sleep(0.000002)
+        time.sleep(0.00001)
 
         GPIO.output(TRIG_PIN, GPIO.HIGH)
-        time.sleep(0.000010)
+        time.sleep(0.00001)
 
         GPIO.output(TRIG_PIN, GPIO.LOW)
 
-        # ECHO가 HIGH가 될 때까지 대기
-        timeout_start = time.perf_counter()
+        # ECHO가 HIGH가 되기를 기다림
+        wait_start = time.perf_counter()
 
         while GPIO.input(ECHO_PIN) == GPIO.LOW:
-            if time.perf_counter() - timeout_start > 0.1:
+            if time.perf_counter() - wait_start > 0.1:
                 break
 
-        pulse_start = time.perf_counter()
+        # ECHO가 HIGH가 된 순간
+        echo_start = time.perf_counter()
 
-        # ECHO가 LOW가 될 때까지 대기
+        # ECHO가 LOW가 되기를 기다림
         while GPIO.input(ECHO_PIN) == GPIO.HIGH:
-            if time.perf_counter() - pulse_start > 0.1:
+            if time.perf_counter() - echo_start > 0.1:
                 break
 
-        pulse_end = time.perf_counter()
+        echo_end = time.perf_counter()
 
-        pulse_time = pulse_end - pulse_start
+        pulse_width = echo_end - echo_start
 
         # 거리 계산
-        distance = pulse_time * 34300 / 2
+        distance = pulse_width * 34300 / 2
 
-        if pulse_time >= 0.1:
+        if pulse_width >= 0.1:
             print("측정 실패")
         else:
             print("거리: {:.1f} cm".format(distance))
-
-        time.sleep(0.2)
 
 except KeyboardInterrupt:
     print("\n프로그램 종료")
