@@ -9,35 +9,36 @@ GPIO.setmode(GPIO.BOARD)
 GPIO.setup(TRIG_PIN, GPIO.OUT, initial=GPIO.LOW)
 GPIO.setup(ECHO_PIN, GPIO.IN)
 
-print("================================")
-print("JSN-SR04T 초음파 센서 테스트")
+print("==============================")
+print(" JSN-SR04T 초음파 센서 테스트")
+print("==============================")
 print("TRIG : 물리 핀 12번")
 print("ECHO : 물리 핀 16번")
-print("================================")
-print("센서 앞에 물체를 놓아주세요.")
-print("종료: Ctrl + C")
+print("종료 : Ctrl + C")
+print()
 
 try:
     while True:
 
-        # Trigger 신호
+        # 초음파 발사
         GPIO.output(TRIG_PIN, GPIO.LOW)
         time.sleep(0.000002)
 
         GPIO.output(TRIG_PIN, GPIO.HIGH)
         time.sleep(0.000010)
+
         GPIO.output(TRIG_PIN, GPIO.LOW)
 
-        # ECHO HIGH 기다리기
-        timeout = time.perf_counter()
+        # ECHO가 HIGH가 될 때까지 대기
+        timeout_start = time.perf_counter()
 
         while GPIO.input(ECHO_PIN) == GPIO.LOW:
-            if time.perf_counter() - timeout > 0.1:
+            if time.perf_counter() - timeout_start > 0.1:
                 break
 
         pulse_start = time.perf_counter()
 
-        # ECHO LOW 기다리기
+        # ECHO가 LOW가 될 때까지 대기
         while GPIO.input(ECHO_PIN) == GPIO.HIGH:
             if time.perf_counter() - pulse_start > 0.1:
                 break
@@ -54,7 +55,7 @@ try:
         else:
             print("거리: {:.1f} cm".format(distance))
 
-        time.sleep(0.1)
+        time.sleep(0.2)
 
 except KeyboardInterrupt:
     print("\n프로그램 종료")
