@@ -12,15 +12,25 @@ GPIO.setup(ECHO, GPIO.IN)
 print("==============================")
 print(" JSN-SR04T 거리 측정 테스트")
 print("==============================")
-print("TRIG : Jetson Pin 12")
-print("ECHO : Jetson Pin 16")
+print("TRIG : Pin 12")
+print("ECHO : Pin 16")
 print("==============================")
 
 try:
     while True:
 
+        # 이전 ECHO 상태 확인
+        if GPIO.input(ECHO) == GPIO.HIGH:
+            print("ECHO가 이미 HIGH 상태입니다.")
+            
+            wait_start = time.monotonic()
+
+            while GPIO.input(ECHO) == GPIO.HIGH:
+                if time.monotonic() - wait_start > 0.1:
+                    break
+
         # -------------------------
-        # 1. TRIG 신호 발생
+        # TRIG 신호 발생
         # -------------------------
         GPIO.output(TRIG, GPIO.LOW)
         time.sleep(0.000002)
@@ -30,77 +40,65 @@ try:
 
         GPIO.output(TRIG, GPIO.LOW)
 
-        # -------------------------
-        # 2. ECHO HIGH 시작 대기
-        # -------------------------
-        rising = GPIO.wait_for_edge(
-            ECHO,
-            GPIO.RISING,
-            timeout=100
-        )
-
-        if rising is None:
-            print("ECHO 감지 안됨")
-            time.sleep(0.1)
-            continue
-
-        # ECHO HIGH 시작
-        start = time.monotonic()
+        print("TRIG 전송 완료")
 
         # -------------------------
-        # 3. ECHO LOW 대기
+        # ECHO HIGH 기다리기
         # -------------------------
-        falling = GPIO.wait_for_edge(
-            ECHO,
-            GPIO.FALLING,
-            timeout=100
-        )
+        timeout_start = time.monotonic()
 
-        if falling is None:
-            print("ECHO 종료 안됨")
-            time.sleep(0.1)
-            continue
+        while GPIO.input(ECHO) == GPIO.LOW:
 
-        # ECHO HIGH 종료
-        end = time.monotonic()
-
-        # -------------------------
-        # 4. ECHO 시간 계산
-        # -------------------------
-        echo_time = end - start
-
-        # -------------------------
-        # 5. 거리 계산
-        # -------------------------
-        distance = (echo_time * 34300.0) / 2.0
-
-        # -------------------------
-        # 6. 거리 범위 확인
-        # -------------------------
-        if 20.0 <= distance <= 600.0:
-
-            print(
-                "ECHO 감지됨 → 거리: {:.2f} cm".format(
-                    distance
-                )
-            )
+            if time.monotonic() - timeout_start > 0.1:
+                print("ECHO 감지 안됨")
+                break
 
         else:
 
-            print(
-                "ECHO 감지됨 → 잘못된 거리: {:.2f} cm".format(
-                    distance
+            # ECHO HIGH 감지
+            start = time.monotonic()
+
+            print("ECHO HIGH 감지!")
+
+            # ECHO LOW 기다리기
+            while GPIO.input(ECHO) == GPIO.HIGH:
+
+                if time.monotonic() - start > 0.1:
+                    print("ECHO 종료 안됨")
+                    break
+
+            else:
+
+                end = time.monotonic()
+
+                echo_time = end - start
+
+                distance = echo_time * 34300.0 / 2.0
+
+                print(
+                    "ECHO 시간: {:.6f} sec".format(echo_time)
                 )
-            )
 
-        # 측정 간격
-        time.sleep(0.08)
+                if 20 <= distance <= 600:
 
+                    print(
+                        "거리: {:.2f} cm".format(distance)
+                    )
+
+                else:
+
+                    print(
+                        "잘못된 측정값: {:.2f} cm".format(distance)
+                    )
+
+        print("------------------------------")
+
+        # 다음 측정까지 대기
+        time.sleep(0.1)
 
 except KeyboardInterrupt:
 
     print("\n측정 종료")
-
 
 finally:
 
