@@ -40,11 +40,11 @@ try:
         )
 
         if rising is None:
-            print("ECHO 없음")
+            print("ECHO 감지 안됨")
             time.sleep(0.1)
             continue
 
-        # HIGH 시작 시간
+        # ECHO HIGH 시작
         start = time.monotonic()
 
         # -------------------------
@@ -57,41 +57,43 @@ try:
         )
 
         if falling is None:
-            print("ECHO 종료 없음")
+            print("ECHO 종료 안됨")
             time.sleep(0.1)
             continue
 
-        # HIGH 종료 시간
+        # ECHO HIGH 종료
         end = time.monotonic()
 
         # -------------------------
-        # 4. 거리 계산
+        # 4. ECHO 시간 계산
         # -------------------------
         echo_time = end - start
 
+        # -------------------------
+        # 5. 거리 계산
+        # -------------------------
         distance = (echo_time * 34300.0) / 2.0
 
         # -------------------------
-        # 5. 유효 범위 확인
+        # 6. 거리 범위 확인
         # -------------------------
         if 20.0 <= distance <= 600.0:
 
             print(
-                "거리: {:.2f} cm   (ECHO: {:.6f} sec)".format(
-                    distance,
-                    echo_time
+                "ECHO 감지됨 → 거리: {:.2f} cm".format(
+                    distance
                 )
             )
 
         else:
 
             print(
-                "잘못된 측정값: {:.2f} cm".format(
+                "ECHO 감지됨 → 잘못된 거리: {:.2f} cm".format(
                     distance
                 )
             )
 
-        # JSN-SR04T 측정 간격
+        # 측정 간격
         time.sleep(0.08)
 
 
