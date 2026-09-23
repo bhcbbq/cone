@@ -10,12 +10,11 @@ GPIO.setup(TRIG, GPIO.OUT, initial=GPIO.LOW)
 GPIO.setup(ECHO, GPIO.IN)
 
 print("==============================")
-print(" JSN-SR04T ECHO 진단 테스트")
+print(" JSN-SR04T 거리 측정 테스트")
 print("==============================")
 print("TRIG : Jetson Pin 12")
 print("ECHO : Jetson Pin 16")
 print("==============================")
-print()
 
 try:
     while True:
@@ -32,54 +31,73 @@ try:
         GPIO.output(TRIG, GPIO.LOW)
 
         # -------------------------
-        # 2. ECHO HIGH 기다리기
+        # 2. ECHO HIGH 시작 대기
         # -------------------------
-        start_wait = time.monotonic()
+        rising = GPIO.wait_for_edge(
+            ECHO,
+            GPIO.RISING,
+            timeout=100
+        )
 
-        echo_detected = False
+        if rising is None:
+            print("ECHO 없음")
+            time.sleep(0.1)
+            continue
 
-        while time.monotonic() - start_wait < 0.1:
-
-            if GPIO.input(ECHO) == GPIO.HIGH:
-                echo_detected = True
-                break
+        # HIGH 시작 시간
+        start = time.monotonic()
 
         # -------------------------
-        # 3. 결과 출력
+        # 3. ECHO LOW 대기
         # -------------------------
-        if echo_detected:
+        falling = GPIO.wait_for_edge(
+            ECHO,
+            GPIO.FALLING,
+            timeout=100
+        )
 
-            print(">>> ECHO HIGH 감지!")
+        if falling is None:
+            print("ECHO 종료 없음")
+            time.sleep(0.1)
+            continue
 
-            # ECHO가 LOW가 될 때까지 기다림
-            start = time.monotonic()
+        # HIGH 종료 시간
+        end = time.monotonic()
 
-            while GPIO.input(ECHO) == GPIO.HIGH:
+        # -------------------------
+        # 4. 거리 계산
+        # -------------------------
+        echo_time = end - start
 
-                if time.monotonic() - start > 0.1:
-                    break
+        distance = (echo_time * 34300.0) / 2.0
 
-            end = time.monotonic()
+        # -------------------------
+        # 5. 유효 범위 확인
+        # -------------------------
+        if 20.0 <= distance <= 600.0:
 
-            echo_time = end - start
-
-            distance = echo_time * 34300 / 2
-
-            print("ECHO 시간 : {:.6f} sec".format(echo_time))
-            print("계산 거리 : {:.2f} cm".format(distance))
-            print()
+            print(
+                "거리: {:.2f} cm   (ECHO: {:.6f} sec)".format(
+                    distance,
+                    echo_time
+                )
+            )
 
         else:
 
-            print("ECHO 없음")
+            print(
+                "잘못된 측정값: {:.2f} cm".format(
+                    distance
+                )
+            )
 
-        time.sleep(0.2)
+        # JSN-SR04T 측정 간격
+        time.sleep(0.08)
 
 
 except KeyboardInterrupt:
 
-    print()
-    print("테스트 종료")
+    print("\n측정 종료")
 
 
 finally:
