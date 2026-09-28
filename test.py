@@ -1,47 +1,31 @@
 import Jetson.GPIO as GPIO
 import time
 
-TRIG = 12
 ECHO = 16
 
 GPIO.setmode(GPIO.BOARD)
-
-GPIO.setup(TRIG, GPIO.OUT, initial=GPIO.LOW)
 GPIO.setup(ECHO, GPIO.IN)
 
 try:
-    for i in range(10):
-        print(f"\n--- {i+1}번째 테스트 ---")
+    print("Pin 16 감시 시작")
 
-        # 센서에 TRIG 신호
-        GPIO.output(TRIG, GPIO.HIGH)
-        time.sleep(0.0001)   # 100 us
-        GPIO.output(TRIG, GPIO.LOW)
+    end_time = time.time() + 5
 
-        # ECHO가 HIGH가 되는지 약 10ms 동안 확인
-        start = time.perf_counter()
-        detected = False
+    while time.time() < end_time:
+        if GPIO.input(ECHO) == GPIO.HIGH:
+            start = time.perf_counter()
 
-        while time.perf_counter() - start < 0.01:
-            if GPIO.input(ECHO) == GPIO.HIGH:
-                detected = True
-                high_start = time.perf_counter()
+            while GPIO.input(ECHO) == GPIO.HIGH:
+                pass
 
-                # ECHO가 LOW로 내려갈 때까지 측정
-                while GPIO.input(ECHO) == GPIO.HIGH:
-                    pass
+            end = time.perf_counter()
 
-                high_end = time.perf_counter()
+            duration = (end - start) * 1_000_000
 
-                duration = (high_end - high_start) * 1_000_000
+            print(f"ECHO 감지: {duration:.0f} us")
 
-                print(f"ECHO 감지! HIGH 시간 = {duration:.0f} us")
-                break
-
-        if not detected:
-            print("ECHO 없음")
-
-        time.sleep(0.5)
+except KeyboardInterrupt:
+    pass
 
 finally:
     GPIO.cleanup()
