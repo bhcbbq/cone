@@ -5,42 +5,43 @@ TRIG = 12
 ECHO = 16
 
 GPIO.setmode(GPIO.BOARD)
+
 GPIO.setup(TRIG, GPIO.OUT, initial=GPIO.LOW)
 GPIO.setup(ECHO, GPIO.IN)
 
 try:
     for i in range(10):
-        print(f"\n--- {i+1}번째 측정 ---")
+        print(f"\n--- {i+1}번째 테스트 ---")
 
-        # AJ-SR04M Mode 1 Trigger
+        # 센서에 TRIG 신호
         GPIO.output(TRIG, GPIO.HIGH)
         time.sleep(0.0001)   # 100 us
         GPIO.output(TRIG, GPIO.LOW)
 
-        # ECHO HIGH 기다리기
-        start = time.time()
+        # ECHO가 HIGH가 되는지 약 10ms 동안 확인
+        start = time.perf_counter()
+        detected = False
 
-        while GPIO.input(ECHO) == GPIO.LOW:
-            if time.time() - start > 0.1:
-                print("ECHO 없음")
+        while time.perf_counter() - start < 0.01:
+            if GPIO.input(ECHO) == GPIO.HIGH:
+                detected = True
+                high_start = time.perf_counter()
+
+                # ECHO가 LOW로 내려갈 때까지 측정
+                while GPIO.input(ECHO) == GPIO.HIGH:
+                    pass
+
+                high_end = time.perf_counter()
+
+                duration = (high_end - high_start) * 1_000_000
+
+                print(f"ECHO 감지! HIGH 시간 = {duration:.0f} us")
                 break
 
-        else:
-            echo_start = time.time()
+        if not detected:
+            print("ECHO 없음")
 
-            while GPIO.input(ECHO) == GPIO.HIGH:
-                if time.time() - echo_start > 0.1:
-                    print("ECHO 너무 김")
-                    break
-
-            else:
-                echo_end = time.time()
-                duration = echo_end - echo_start
-                distance = duration * 34300 / 2
-
-                print(f"거리 = {distance:.2f} cm")
-
-        time.sleep(0.2)
+        time.sleep(0.5)
 
 finally:
     GPIO.cleanup()
