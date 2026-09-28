@@ -167,13 +167,13 @@ export default function HomeScreen() {
 
       return (
         result[
-          'android.permission.BLUETOOTH_SCAN'
+        'android.permission.BLUETOOTH_SCAN'
         ] ===
-          PermissionsAndroid.RESULTS.GRANTED &&
+        PermissionsAndroid.RESULTS.GRANTED &&
         result[
-          'android.permission.BLUETOOTH_CONNECT'
+        'android.permission.BLUETOOTH_CONNECT'
         ] ===
-          PermissionsAndroid.RESULTS.GRANTED
+        PermissionsAndroid.RESULTS.GRANTED
       );
     }
 
@@ -260,6 +260,21 @@ export default function HomeScreen() {
         activeTargetDistanceRef.current
       );
 
+      setRobotStatus('arrived');
+      return;
+    }
+    if (message === 'RETURNING') {
+      setRobotStatus('returning');
+      return;
+    }
+
+    if (message === 'RETURNED') {
+      setRobotStatus('returnCompleted');
+      return;
+    }
+
+    if (message === 'RETURN_ERROR') {
+      console.log('RETURN ERROR');
       setRobotStatus('arrived');
       return;
     }
@@ -391,7 +406,7 @@ export default function HomeScreen() {
                         decoded
                       );
                     } catch (
-                      decodeError
+                    decodeError
                     ) {
                       console.log(
                         'BLE NOTIFY DECODE ERROR:',
@@ -545,7 +560,7 @@ export default function HomeScreen() {
     const connected =
       TEST_MODE ||
       connectionStatus ===
-        'connected';
+      'connected';
 
     if (!connected) {
       return;
@@ -644,6 +659,29 @@ export default function HomeScreen() {
   };
 
   // =========================
+  // RETURN
+  // =========================
+
+  const returnDriving = async () => {
+    if (robotStatus !== 'arrived') {
+      return;
+    }
+
+    const returnSent =
+      await sendCommand('RETURN');
+
+    if (!returnSent) {
+      return;
+    }
+
+    // Jetson의 RETURNING Notify로도 바뀌지만
+    // 버튼 반응을 바로 보여주기 위해 먼저 변경
+    setRobotStatus('returning');
+
+    console.log('RETURN');
+  };
+
+  // =========================
   // RESET
   // =========================
 
@@ -706,7 +744,7 @@ export default function HomeScreen() {
         TEST_MODE
           ? `${BLE_DEVICE_NAME} (TEST)`
           : device?.name ??
-            BLE_DEVICE_NAME
+          BLE_DEVICE_NAME
       }
 
       warnings={{}}
@@ -731,9 +769,15 @@ export default function HomeScreen() {
         stopDriving
       }
 
+      onReturn={
+        returnDriving
+      }
+
       onResetDistance={
         resetDistance
       }
     />
   );
 }
+
+
