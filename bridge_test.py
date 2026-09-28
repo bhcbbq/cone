@@ -3,6 +3,7 @@ import threading
 import time
 import json
 
+
 # =========================
 # SERIAL SETTINGS
 # =========================
@@ -42,6 +43,9 @@ print("UGV  :", UGV_PORT, UGV_BAUD)
 running = False
 stop_flag = False
 
+# STOP을 눌렀지만 아직 최종 엔코더값을 못 받은 상태
+stop_pending = False
+
 start_odl = None
 start_odr = None
 
@@ -55,6 +59,7 @@ target_distance = None
 def hc12_receive():
     global running
     global stop_flag
+    global stop_pending
     global start_odl
     global start_odr
     global target_distance
@@ -91,6 +96,7 @@ def hc12_receive():
 
                     if cmd == "START":
 
+                        stop_pending = False
                         running = True
 
                         print("UGV START")
@@ -108,7 +114,9 @@ def hc12_receive():
 
                     elif cmd == "STOP":
 
+                        # 모터는 즉시 정지
                         running = False
+                        stop_pending = True
 
                         ugv.write(
                             b'{"T":1,"L":0.0,"R":0.0}\n'
@@ -117,12 +125,13 @@ def hc12_receive():
                         ugv.flush()
 
                         print("UGV STOP")
-
-                        hc12.write(
-                            b'STOPPED\n'
+                        print(
+                            "WAITING FOR FINAL STOP DISTANCE..."
                         )
 
-                        hc12.flush()
+                        # 여기서는 STOPPED를 바로 보내지 않음
+                        # 다음 T2100에서 실제 정지거리를 받은 후
+                        # DISTANCE -> STOPPED 순서로 전송
 
 
                     # =====================
@@ -132,6 +141,7 @@ def hc12_receive():
                     elif cmd == "EMERGENCY_STOP":
 
                         running = False
+                        stop_pending = False
 
                         ugv.write(
                             b'{"T":0}\n'
@@ -139,7 +149,9 @@ def hc12_receive():
 
                         ugv.flush()
 
-                        print("UGV EMERGENCY STOP")
+                        print(
+                            "UGV EMERGENCY STOP"
+                        )
 
                         hc12.write(
                             b'EMERGENCY\n'
@@ -163,24 +175,30 @@ def hc12_receive():
 
                             if distance <= 0:
 
-                                print("INVALID TARGET")
+                                print(
+                                    "INVALID TARGET"
+                                )
 
                                 continue
 
                             target_distance = distance
+                            stop_pending = False
 
-                            # 새 주행 기준점 초기화
+                            # 새 목표가 들어오면
+                            # 새 주행 기준점으로 다시 시작
                             start_odl = None
                             start_odr = None
 
                             message = (
                                 '{"T":2101,"d":'
-                                + str(distance)
+                                + f"{distance:.3f}"
                                 + '}\n'
                             )
 
                             ugv.write(
-                                message.encode('utf-8')
+                                message.encode(
+                                    'utf-8'
+                                )
                             )
 
                             ugv.flush()
@@ -191,7 +209,8 @@ def hc12_receive():
                                 "m"
                             )
 
-                            # 외부 ESP32에도 목표거리 확인 전달
+                            # 외부 ESP32 / 앱에도
+                            # 설정된 목표거리 전달
                             hc12.write(
                                 f"TARGET:{distance:.2f}\n".encode()
                             )
@@ -213,10 +232,15 @@ def hc12_receive():
 
                     elif cmd == "RESET_DISTANCE":
 
+                        running = False
+                        stop_pending = False
+
                         start_odl = None
                         start_odr = None
 
-                        print("DISTANCE RESET")
+                        print(
+                            "DISTANCE RESET"
+                        )
 
                         hc12.write(
                             b'DISTANCE:0.00\n'
@@ -267,7 +291,8 @@ try:
 
         if running:
 
-            # heartbeat 때문에 계속 전송
+            # UGV heartbeat 때문에
+            # 주행 명령 계속 전송
             ugv.write(
                 b'{"T":1,"L":0.5,"R":0.5}\n'
             )
@@ -295,7 +320,6 @@ try:
             # =====================
             # T2100
             # ENCODER DISTANCE
-            # 주행 중에만 ESP32로 전달
             # =====================
 
             if line.startswith('{"T":2100'):
@@ -312,16 +336,28 @@ try:
                         data["odr"]
                     )
 
-                    # 첫 T2100 값을 기준점으로 저장
+
+                    # =====================
+                    # 거리 기준점
+                    # =====================
+
                     if start_odl is None:
                         start_odl = odl
 
                     if start_odr is None:
                         start_odr = odr
 
-                    delta_l = odl - start_odl
-                    delta_r = odr - start_odr
 
+                    delta_l = (
+                        odl - start_odl
+                    )
+
+                    delta_r = (
+                        odr - start_odr
+                    )
+
+
+                    # UGV의 T2100 odl/odr은 cm
                     distance_cm = (
                         delta_l + delta_r
                     ) / 2.0
@@ -333,11 +369,16 @@ try:
                     if distance_m < 0:
                         distance_m = 0.0
 
-                    # 주행 중일 때만 ESP32로 현재거리 전송
+
+                    # =====================
+                    # 정상 주행 중
+                    # =====================
+
                     if running:
 
                         msg = (
-                            f"DISTANCE:{distance_m:.2f}\n"
+                            f"DISTANCE:"
+                            f"{distance_m:.2f}\n"
                         )
 
                         hc12.write(
@@ -351,6 +392,47 @@ try:
                             f"{distance_m:.2f}",
                             "m"
                         )
+
+
+                    # =====================
+                    # STOP 직후
+                    # =====================
+
+                    elif stop_pending:
+
+                        # STOP 직후에 들어온
+                        # 최신 T2100을 실제 정지거리로 사용
+                        msg = (
+                            f"DISTANCE:"
+                            f"{distance_m:.2f}\n"
+                        )
+
+                        hc12.write(
+                            msg.encode('utf-8')
+                        )
+
+                        hc12.flush()
+
+                        print(
+                            "STOP DISTANCE:",
+                            f"{distance_m:.2f}",
+                            "m"
+                        )
+
+
+                        # 최신 거리 전송 후에
+                        # STOPPED 전송
+                        hc12.write(
+                            b'STOPPED\n'
+                        )
+
+                        hc12.flush()
+
+                        print(
+                            "STOPPED SENT"
+                        )
+
+                        stop_pending = False
 
 
                 except Exception as e:
@@ -369,6 +451,7 @@ try:
             elif '"T":2102' in line:
 
                 running = False
+                stop_pending = False
 
                 # 도착 즉시 정지 명령
                 ugv.write(
@@ -377,7 +460,9 @@ try:
 
                 ugv.flush()
 
-                # T2102에 들어있는 실제 도착거리 사용
+
+                # T2102에 들어있는
+                # 실제 도착거리 사용
                 try:
 
                     data = json.loads(line)
@@ -388,7 +473,8 @@ try:
 
                     # 최종거리 먼저 전달
                     hc12.write(
-                        f"DISTANCE:{arrived_distance:.2f}\n".encode()
+                        f"DISTANCE:"
+                        f"{arrived_distance:.2f}\n".encode()
                     )
 
                     hc12.flush()
@@ -399,12 +485,14 @@ try:
                         "m"
                     )
 
+
                 except Exception as e:
 
                     print(
                         "ARRIVAL DISTANCE ERROR:",
                         e
                     )
+
 
                 # 그 다음 도착 상태 전달
                 hc12.write(
@@ -431,6 +519,7 @@ except KeyboardInterrupt:
 
     stop_flag = True
     running = False
+    stop_pending = False
 
     try:
 
