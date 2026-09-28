@@ -9,59 +9,51 @@ GPIO.setmode(GPIO.BOARD)
 GPIO.setup(TRIG, GPIO.OUT, initial=GPIO.LOW)
 GPIO.setup(ECHO, GPIO.IN)
 
-print("====================================")
-print(" JSN-SR04T ECHO TEST")
-print("====================================")
-print("TRIG : Physical Pin 12")
-print("ECHO : Physical Pin 16")
-print()
-
 try:
+    print("AJ-SR04M 초음파 테스트 시작")
+    print("5초 후 측정을 시작합니다.")
+    time.sleep(5)
+
     for i in range(10):
 
-        print("측정 {} / 10".format(i + 1))
+        print(f"\n--- {i + 1}번째 측정 ---")
 
-        # 센서 안정화
-        GPIO.output(TRIG, GPIO.LOW)
-        time.sleep(0.05)
-
-        # 10 us TRIG 펄스
+        # TRIG 10us HIGH
         GPIO.output(TRIG, GPIO.HIGH)
         time.sleep(0.00001)
         GPIO.output(TRIG, GPIO.LOW)
 
-        # ECHO가 HIGH가 될 때까지 최대 0.2초 기다림
-        wait_start = time.time()
+        # ECHO가 HIGH가 될 때까지 기다림
+        start_wait = time.perf_counter()
 
         while GPIO.input(ECHO) == GPIO.LOW:
-            if time.time() - wait_start > 0.2:
-                print("  -> ECHO 없음")
+            if time.perf_counter() - start_wait > 0.1:
+                print("ECHO 없음")
                 break
-
         else:
-            # ECHO HIGH 감지
-            echo_start = time.time()
 
-            # ECHO가 LOW가 될 때까지 기다림
+            # ECHO HIGH 시작
+            start = time.perf_counter()
+
             while GPIO.input(ECHO) == GPIO.HIGH:
-                if time.time() - echo_start > 0.2:
-                    print("  -> ECHO HIGH 유지시간 초과")
+                if time.perf_counter() - start > 0.1:
+                    print("ECHO 너무 김")
                     break
 
-            echo_end = time.time()
+            else:
 
-            pulse_time = echo_end - echo_start
+                end = time.perf_counter()
 
-            distance = (pulse_time * 34300) / 2
+                # ECHO HIGH 시간
+                duration = (end - start) * 1_000_000
 
-            print("  -> ECHO 감지!")
-            print("  -> 거리: {:.2f} cm".format(distance))
+                # 거리 계산
+                distance = duration * 0.0343 / 2
 
-        time.sleep(0.5)
+                print(f"ECHO 시간 : {duration:.0f} us")
+                print(f"거리      : {distance:.2f} cm")
 
-except KeyboardInterrupt:
-    print("\n사용자가 종료했습니다.")
+        time.sleep(1)
 
 finally:
     GPIO.cleanup()
-    print("\nGPIO 정리 완료")
