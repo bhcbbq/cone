@@ -2,7 +2,7 @@ import Jetson.GPIO as GPIO
 import time
 
 TRIG = 12
-ECHO = 16
+ECHO = 29
 
 GPIO.setmode(GPIO.BOARD)
 
