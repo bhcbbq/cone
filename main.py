@@ -7,7 +7,11 @@ import numpy as np
 import lane_detection
 import ugv_control
 
+<<<<<<< HEAD
+# 기본 설정 및 스레드 간 데이터 공유 변
+=======
 # 기본 설정 및 스레드 간 데이터 공유 변수
+>>>>>>> a5faf4185d1b873af8dad864f2c127b7ef511d0a
 BASE_SPEED = 0.3  
 shared_error = 0            
 shared_speed = 0.0          

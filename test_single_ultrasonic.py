@@ -2,7 +2,7 @@ import Jetson.GPIO as GPIO
 import time
 
 TRIG_PIN = 29
-ECHO_PIN = 22
+ECHO_PIN = 18
 
 GPIO.setwarnings(False)
 GPIO.setmode(GPIO.BOARD)
