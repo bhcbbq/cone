@@ -1,38 +1,39 @@
+import serial
 import time
-from ultrasonic_sensor import UltrasonicSensor
+
+# 아두이노 연결 포트 및 보레이트 설정
+# 포트가 ttyUSB0인 경우 PORT = '/dev/ttyUSB0'로 변경하세요.
+PORT = '/dev/ttyACM0'
+BAUDRATE = 9600
 
 def main():
-    print("=========================================")
-    print(" 🚀 아두이노 초음파 센서 통신 테스트 시작")
-    print("=========================================")
-    
-    # 1. 초음파 센서 객체 생성 및 통신 시작
-    # 포트 이름이 다를 경우 '/dev/ttyUSB0' 등으로 수정하세요.
-    ultrasonic = UltrasonicSensor(port='/dev/ttyACM0', baudrate=9600)
-    ultrasonic.start()
-    
-    # 아두이노가 재부팅되고 통신이 안정화될 때까지 잠시 대기
-    time.sleep(2.0)
-    
-    print("\n[알림] 데이터 수신 중... (종료하려면 Ctrl+C를 누르세요)\n")
-
     try:
-        while True:
-            # 2. 실시간 거리 데이터 가져오기
-            dist_L, dist_C, dist_R = ultrasonic.get_distances()
-            
-            # 3. 터미널에 깔끔하게 정렬하여 출력
-            print(f"좌측(45도): {dist_L:>6.1f} cm  |  정면(센터): {dist_C:>6.1f} cm  |  우측(45도): {dist_R:>6.1f} cm")
-            
-            # 0.1초마다 화면 갱신 (너무 빠르면 보기 힘드므로 조절)
-            time.sleep(0.1)
-
-    except KeyboardInterrupt:
-        print("\n[알림] 사용자에 의해 테스트가 종료되었습니다.")
+        # 시리얼 포트 열기
+        ser = serial.Serial(PORT, BAUDRATE, timeout=1)
+        time.sleep(2)  # 아두이노 시리얼 재부팅 대기
         
-    finally:
-        # 4. 안전하게 포트 닫기
-        ultrasonic.stop()
+        print(f"[{PORT}] 포트에 성공적으로 연결되었습니다.")
+        print("데이터 수신을 시작합니다. (종료하려면 Ctrl+C를 누르세요)\n")
+        print("-" * 60)
 
-if __name__ == "__main__":
+        while True:
+            if ser.in_waiting > 0:
+                # 시리얼 데이터 읽기 및 문자열 변환
+                raw_data = ser.readline()
+                line = raw_data.decode('utf-8', errors='replace').rstrip()
+                
+                if line:
+                    print(f"[수신 완료] {line}")
+
+    except serial.SerialException as e:
+        print(f"\n[오류] 시리얼 통신 에러: {e}")
+        print("팁: 연결 포트명이 맞는지 확인하고 'sudo chmod 666 /dev/ttyACM0' 명령어로 권한을 부여하세요.")
+    except KeyboardInterrupt:
+        print("\n[종료] 수신을 중단합니다.")
+    finally:
+        if 'ser' in locals() and ser.is_open:
+            ser.close()
+            print("시리얼 포트가 닫혔습니다.")
+
+if __name__ == '__main__':
     main()
