@@ -2,7 +2,6 @@ import serial
 import threading
 import time
 import json
-import math
 
 
 # =========================
@@ -17,19 +16,14 @@ UGV_BAUD = 115200
 
 
 # =========================
-# RETURN SETTINGS
+# DRIVE / RETURN SETTINGS
 # =========================
 
-# UGV02 좌우 바퀴 중심 간 거리
-TRACK_WIDTH_M = 0.172
-
-# 제자리 180도 회전 시
-# 각 바퀴가 이동해야 하는 이론적 거리
-# pi * track_width / 2
-TURN_180_DISTANCE_M = 0.5
-
-# 회전 속도
+DRIVE_SPEED = 0.5
 TURN_SPEED = 0.35
+
+# 실제 테스트해서 맞춘 값
+TURN_180_DISTANCE_M = 0.50
 
 
 # =========================
@@ -49,22 +43,8 @@ ugv = serial.Serial(
 )
 
 print("BRIDGE READY")
-print(
-    "HC12 :",
-    HC12_PORT,
-    HC12_BAUD
-)
-print(
-    "UGV  :",
-    UGV_PORT,
-    UGV_BAUD
-)
-
-print(
-    "180 TURN DISTANCE:",
-    f"{TURN_180_DISTANCE_M:.3f}",
-    "m"
-)
+print("HC12 :", HC12_PORT, HC12_BAUD)
+print("UGV  :", UGV_PORT, UGV_BAUD)
 
 
 # =========================
@@ -72,27 +52,35 @@ print(
 # =========================
 
 running = False
-returning = False
+returning_turn = False
+returning_drive = False
 
 stop_flag = False
 stop_pending = False
 
-
-# 일반 주행 거리 기준
 start_odl = None
 start_odr = None
 
 target_distance = None
 
-
-# 가장 최근 엔코더
 current_odl = None
 current_odr = None
 
 
-# RETURN 시작 시 엔코더
-return_start_odl = None
-return_start_odr = None
+# =========================
+# RETURN STATE
+# =========================
+
+# 실제 처음 주행한 거리
+return_drive_distance = 0.0
+
+# 회전 시작 엔코더
+return_turn_start_odl = None
+return_turn_start_odr = None
+
+# 복귀 직진 시작 엔코더
+return_drive_start_odl = None
+return_drive_start_odr = None
 
 
 # =========================
@@ -102,7 +90,8 @@ return_start_odr = None
 def hc12_receive():
 
     global running
-    global returning
+    global returning_turn
+    global returning_drive
 
     global stop_flag
     global stop_pending
@@ -115,8 +104,13 @@ def hc12_receive():
     global current_odl
     global current_odr
 
-    global return_start_odl
-    global return_start_odr
+    global return_drive_distance
+
+    global return_turn_start_odl
+    global return_turn_start_odr
+
+    global return_drive_start_odl
+    global return_drive_start_odr
 
 
     buffer = ""
@@ -141,14 +135,10 @@ def hc12_receive():
                 if c == '\n':
 
                     cmd = buffer.strip()
-
                     buffer = ""
 
-
                     if not cmd:
-
                         continue
-
 
                     print(
                         "\nHC12 RX:",
@@ -162,16 +152,14 @@ def hc12_receive():
 
                     if cmd == "START":
 
-                        returning = False
+                        returning_turn = False
+                        returning_drive = False
+
                         stop_pending = False
 
                         running = True
 
-
-                        print(
-                            "UGV START"
-                        )
-
+                        print("UGV START")
 
                         hc12.write(
                             b'DRIVING\n'
@@ -187,26 +175,18 @@ def hc12_receive():
                     elif cmd == "STOP":
 
                         running = False
-                        returning = False
+                        returning_turn = False
+                        returning_drive = False
 
-
-                        # 즉시 정지
                         ugv.write(
                             b'{"T":1,"L":0.0,"R":0.0}\n'
                         )
 
                         ugv.flush()
 
+                        print("UGV STOP")
 
-                        print(
-                            "UGV STOP"
-                        )
-
-
-                        # 다음 T2100을 받은 후
-                        # 최종거리 → STOPPED 순서로 전송
                         stop_pending = True
-
 
                         print(
                             "WAITING FOR FINAL STOP DISTANCE..."
@@ -220,9 +200,9 @@ def hc12_receive():
                     elif cmd == "EMERGENCY_STOP":
 
                         running = False
-                        returning = False
+                        returning_turn = False
+                        returning_drive = False
                         stop_pending = False
-
 
                         ugv.write(
                             b'{"T":0}\n'
@@ -230,11 +210,9 @@ def hc12_receive():
 
                         ugv.flush()
 
-
                         print(
                             "UGV EMERGENCY STOP"
                         )
-
 
                         hc12.write(
                             b'EMERGENCY\n'
@@ -245,7 +223,6 @@ def hc12_receive():
 
                     # =====================
                     # TARGET
-                    # ex) TARGET:0.50
                     # =====================
 
                     elif cmd.startswith(
@@ -261,7 +238,6 @@ def hc12_receive():
                                 )[1]
                             )
 
-
                             if distance <= 0:
 
                                 print(
@@ -271,12 +247,8 @@ def hc12_receive():
                                 continue
 
 
-                            target_distance = (
-                                distance
-                            )
+                            target_distance = distance
 
-
-                            # 새로운 주행 구간
                             start_odl = None
                             start_odr = None
 
@@ -306,7 +278,6 @@ def hc12_receive():
                             )
 
 
-                            # 앱으로 목표거리 확인
                             hc12.write(
                                 (
                                     f"TARGET:"
@@ -329,31 +300,26 @@ def hc12_receive():
 
                     # =====================
                     # RETURN
-                    # 180 DEGREE TURN ONLY
                     # =====================
 
                     elif cmd == "RETURN":
 
-                        # 일반 주행 중지
                         running = False
                         stop_pending = False
 
+                        returning_drive = False
 
-                        # 일단 모터 정지
+
+                        # 일단 정지
                         ugv.write(
                             b'{"T":1,"L":0.0,"R":0.0}\n'
                         )
 
                         ugv.flush()
 
-
-                        time.sleep(
-                            0.2
-                        )
+                        time.sleep(0.2)
 
 
-                        # 엔코더 값이 아직 없으면
-                        # 회전 시작 불가
                         if (
                             current_odl is None
                             or current_odr is None
@@ -364,6 +330,24 @@ def hc12_receive():
                                 " NO ENCODER DATA"
                             )
 
+                            hc12.write(
+                                b'RETURN_ERROR\n'
+                            )
+
+                            hc12.flush()
+
+                            continue
+
+
+                        if (
+                            return_drive_distance
+                            <= 0
+                        ):
+
+                            print(
+                                "RETURN ERROR:"
+                                " NO DRIVE DISTANCE"
+                            )
 
                             hc12.write(
                                 b'RETURN_ERROR\n'
@@ -371,21 +355,19 @@ def hc12_receive():
 
                             hc12.flush()
 
-
                             continue
 
 
-                        # RETURN 시작점 저장
-                        return_start_odl = (
+                        # 회전 시작점 저장
+                        return_turn_start_odl = (
                             current_odl
                         )
 
-                        return_start_odr = (
+                        return_turn_start_odr = (
                             current_odr
                         )
 
-
-                        returning = True
+                        returning_turn = True
 
 
                         print(
@@ -393,16 +375,13 @@ def hc12_receive():
                         )
 
                         print(
-                            "TURN START ODOM:",
-                            return_start_odl,
-                            return_start_odr
+                            "RETURN DISTANCE:",
+                            f"{return_drive_distance:.2f}",
+                            "m"
                         )
 
-
                         print(
-                            "TARGET TURN DISTANCE:",
-                            f"{TURN_180_DISTANCE_M:.3f}",
-                            "m"
+                            "180 TURN START"
                         )
 
 
@@ -422,11 +401,11 @@ def hc12_receive():
                         start_odl = None
                         start_odr = None
 
+                        return_drive_distance = 0.0
 
                         print(
                             "DISTANCE RESET"
                         )
-
 
                         hc12.write(
                             b'DISTANCE:0.00\n'
@@ -452,13 +431,11 @@ def hc12_receive():
                     buffer += c
 
 
-        time.sleep(
-            0.001
-        )
+        time.sleep(0.001)
 
 
 # =========================
-# START HC12 THREAD
+# THREAD START
 # =========================
 
 thread = threading.Thread(
@@ -484,9 +461,13 @@ try:
 
         if running:
 
-            # UGV heartbeat
             ugv.write(
-                b'{"T":1,"L":0.5,"R":0.5}\n'
+                (
+                    '{"T":1,'
+                    f'"L":{DRIVE_SPEED},'
+                    f'"R":{DRIVE_SPEED}'
+                    '}\n'
+                ).encode()
             )
 
             ugv.flush()
@@ -496,21 +477,33 @@ try:
         # RETURN TURN
         # =====================
 
-        elif returning:
-
-            # 제자리 회전
-            # 왼쪽 후진 / 오른쪽 전진
-            command = (
-                '{"T":1,'
-                f'"L":{-TURN_SPEED},'
-                f'"R":{TURN_SPEED}'
-                '}\n'
-            )
+        elif returning_turn:
 
             ugv.write(
-                command.encode(
-                    'utf-8'
-                )
+                (
+                    '{"T":1,'
+                    f'"L":{-TURN_SPEED},'
+                    f'"R":{TURN_SPEED}'
+                    '}\n'
+                ).encode()
+            )
+
+            ugv.flush()
+
+
+        # =====================
+        # RETURN DRIVE
+        # =====================
+
+        elif returning_drive:
+
+            ugv.write(
+                (
+                    '{"T":1,'
+                    f'"L":{DRIVE_SPEED},'
+                    f'"R":{DRIVE_SPEED}'
+                    '}\n'
+                ).encode()
             )
 
             ugv.flush()
@@ -527,9 +520,7 @@ try:
                 errors='ignore'
             ).strip()
 
-
             if not line:
-
                 continue
 
 
@@ -541,7 +532,6 @@ try:
 
             # =====================
             # T2100
-            # ENCODER
             # =====================
 
             if line.startswith(
@@ -554,7 +544,6 @@ try:
                         line
                     )
 
-
                     odl = float(
                         data["odl"]
                     )
@@ -563,76 +552,58 @@ try:
                         data["odr"]
                     )
 
-
-                    # 가장 최근 엔코더 저장
                     current_odl = odl
                     current_odr = odr
 
 
                     # =====================
-                    # NORMAL DISTANCE
+                    # NORMAL DRIVE DISTANCE
                     # =====================
 
-                    if not returning:
+                    if (
+                        not returning_turn
+                        and
+                        not returning_drive
+                    ):
 
                         if start_odl is None:
-
                             start_odl = odl
 
-
                         if start_odr is None:
-
                             start_odr = odr
 
 
                         delta_l = (
-                            odl
-                            - start_odl
+                            odl - start_odl
                         )
 
                         delta_r = (
-                            odr
-                            - start_odr
+                            odr - start_odr
                         )
-
-
-                        distance_cm = (
-                            delta_l
-                            + delta_r
-                        ) / 2.0
-
 
                         distance_m = (
-                            distance_cm
-                            / 100.0
-                        )
+                            (
+                                delta_l
+                                + delta_r
+                            )
+                            / 2.0
+                        ) / 100.0
 
 
                         if distance_m < 0:
-
                             distance_m = 0.0
 
 
-                        # =====================
-                        # DRIVING
-                        # =====================
-
                         if running:
 
-                            msg = (
-                                f"DISTANCE:"
-                                f"{distance_m:.2f}\n"
-                            )
-
-
                             hc12.write(
-                                msg.encode(
-                                    'utf-8'
-                                )
+                                (
+                                    f"DISTANCE:"
+                                    f"{distance_m:.2f}\n"
+                                ).encode()
                             )
 
                             hc12.flush()
-
 
                             print(
                                 "CURRENT DISTANCE:",
@@ -641,26 +612,16 @@ try:
                             )
 
 
-                        # =====================
-                        # STOP FINAL DISTANCE
-                        # =====================
-
                         elif stop_pending:
 
-                            msg = (
-                                f"DISTANCE:"
-                                f"{distance_m:.2f}\n"
-                            )
-
-
                             hc12.write(
-                                msg.encode(
-                                    'utf-8'
-                                )
+                                (
+                                    f"DISTANCE:"
+                                    f"{distance_m:.2f}\n"
+                                ).encode()
                             )
 
                             hc12.flush()
-
 
                             print(
                                 "STOP DISTANCE:",
@@ -675,92 +636,144 @@ try:
 
                             hc12.flush()
 
-
                             print(
                                 "STOPPED SENT"
                             )
-
 
                             stop_pending = False
 
 
                     # =====================
-                    # RETURN TURN DISTANCE
+                    # RETURN TURN CHECK
                     # =====================
 
-                    if returning:
+                    if returning_turn:
+
+                        left_m = abs(
+                            odl
+                            - return_turn_start_odl
+                        ) / 100.0
+
+                        right_m = abs(
+                            odr
+                            - return_turn_start_odr
+                        ) / 100.0
+
+
+                        turn_distance = (
+                            left_m
+                            + right_m
+                        ) / 2.0
+
+
+                        print(
+                            "TURN:",
+                            f"{turn_distance:.2f}",
+                            "/",
+                            f"{TURN_180_DISTANCE_M:.2f}",
+                            "m"
+                        )
+
 
                         if (
-                            return_start_odl
-                            is not None
-                            and
-                            return_start_odr
-                            is not None
+                            turn_distance
+                            >= TURN_180_DISTANCE_M
                         ):
 
-                            # odl/odr 단위 = cm
-                            left_m = abs(
-                                odl
-                                - return_start_odl
-                            ) / 100.0
+                            returning_turn = False
 
 
-                            right_m = abs(
-                                odr
-                                - return_start_odr
-                            ) / 100.0
+                            ugv.write(
+                                b'{"T":1,"L":0.0,"R":0.0}\n'
+                            )
 
-
-                            turn_distance = (
-                                left_m
-                                + right_m
-                            ) / 2.0
+                            ugv.flush()
 
 
                             print(
-                                "TURN DISTANCE:",
-                                f"{turn_distance:.3f}",
-                                "/",
-                                f"{TURN_180_DISTANCE_M:.3f}",
-                                "m"
+                                "180 TURN COMPLETE"
                             )
 
 
-                            # =====================
-                            # 180 DEGREE COMPLETE
-                            # =====================
-
-                            if (
-                                turn_distance
-                                >= TURN_180_DISTANCE_M
-                            ):
-
-                                returning = False
+                            time.sleep(
+                                0.3
+                            )
 
 
-                                # 정지
-                                ugv.write(
-                                    b'{"T":1,"L":0.0,"R":0.0}\n'
-                                )
+                            # 복귀 직진 기준 저장
+                            return_drive_start_odl = odl
+                            return_drive_start_odr = odr
 
-                                ugv.flush()
-
-
-                                print(
-                                    "180 TURN COMPLETE"
-                                )
+                            returning_drive = True
 
 
-                                hc12.write(
-                                    b'RETURNED\n'
-                                )
-
-                                hc12.flush()
+                            print(
+                                "RETURN DRIVE START"
+                            )
 
 
-                                print(
-                                    "RETURNED SENT"
-                                )
+                    # =====================
+                    # RETURN DRIVE CHECK
+                    # =====================
+
+                    elif returning_drive:
+
+                        left_m = abs(
+                            odl
+                            - return_drive_start_odl
+                        ) / 100.0
+
+                        right_m = abs(
+                            odr
+                            - return_drive_start_odr
+                        ) / 100.0
+
+
+                        returned_m = (
+                            left_m
+                            + right_m
+                        ) / 2.0
+
+
+                        print(
+                            "RETURN DISTANCE:",
+                            f"{returned_m:.2f}",
+                            "/",
+                            f"{return_drive_distance:.2f}",
+                            "m"
+                        )
+
+
+                        if (
+                            returned_m
+                            >= return_drive_distance
+                        ):
+
+                            returning_drive = False
+
+
+                            ugv.write(
+                                b'{"T":1,"L":0.0,"R":0.0}\n'
+                            )
+
+                            ugv.flush()
+
+
+                            print(
+                                "RETURN COMPLETE"
+                            )
+
+
+                            hc12.write(
+                                b'RETURNED\n'
+                            )
+
+                            hc12.flush()
+
+
+                            print(
+                                "RETURNED SENT"
+                            )
 
 
                 except Exception as e:
@@ -773,7 +786,7 @@ try:
 
             # =====================
             # T2102
-            # TARGET ARRIVED
+            # ARRIVED
             # =====================
 
             elif '"T":2102' in line:
@@ -782,7 +795,6 @@ try:
                 stop_pending = False
 
 
-                # 정지
                 ugv.write(
                     b'{"T":1,"L":0.0,"R":0.0}\n'
                 )
@@ -796,20 +808,22 @@ try:
                         line
                     )
 
-
                     arrived_distance = float(
                         data["distance"]
                     )
 
 
-                    # 최종 거리 먼저 전달
+                    # 이 거리를 RETURN 때 사용
+                    return_drive_distance = (
+                        arrived_distance
+                    )
+
+
                     hc12.write(
                         (
                             f"DISTANCE:"
                             f"{arrived_distance:.2f}\n"
-                        ).encode(
-                            'utf-8'
-                        )
+                        ).encode()
                     )
 
                     hc12.flush()
@@ -818,6 +832,12 @@ try:
                     print(
                         "FINAL DISTANCE:",
                         f"{arrived_distance:.2f}",
+                        "m"
+                    )
+
+                    print(
+                        "RETURN DISTANCE SAVED:",
+                        f"{return_drive_distance:.2f}",
                         "m"
                     )
 
@@ -830,7 +850,6 @@ try:
                     )
 
 
-                # ARRIVED
                 hc12.write(
                     b'ARRIVED\n'
                 )
@@ -858,11 +877,11 @@ except KeyboardInterrupt:
         "\nSTOPPING..."
     )
 
-
     stop_flag = True
 
     running = False
-    returning = False
+    returning_turn = False
+    returning_drive = False
 
     stop_pending = False
 
@@ -876,18 +895,13 @@ except KeyboardInterrupt:
         ugv.flush()
 
     except:
-
         pass
 
 
-    time.sleep(
-        0.2
-    )
-
+    time.sleep(0.2)
 
     hc12.close()
     ugv.close()
-
 
     print(
         "STOPPED"
