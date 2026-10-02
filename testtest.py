@@ -3,7 +3,7 @@ import time
 
 # 아두이노 연결 포트 및 보레이트 설정
 # 포트가 ttyUSB0인 경우 PORT = '/dev/ttyUSB0'로 변경하세요.
-PORT = '/dev/ttyACM0'
+PORT = '/dev/ttyUSB0'
 BAUDRATE = 9600
 
 def main():
