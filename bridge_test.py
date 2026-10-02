@@ -26,9 +26,7 @@ TRACK_WIDTH_M = 0.172
 # 제자리 180도 회전 시
 # 각 바퀴가 이동해야 하는 이론적 거리
 # pi * track_width / 2
-TURN_180_DISTANCE_M = (
-    math.pi * TRACK_WIDTH_M / 2.0
-)
+TURN_180_DISTANCE_M = 0.5
 
 # 회전 속도
 TURN_SPEED = 0.35
