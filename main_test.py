@@ -105,7 +105,7 @@ if __name__ == "__main__":
         exit()
 
     # 2. 아두이노 초음파 센서 모듈 연결 (아두이노 포트 지정)
-    ultrasonic = UltrasonicReader(port='/dev/ttyACM1', baudrate=115200)
+    ultrasonic = UltrasonicReader(port='/dev/ttyUSB0', baudrate=115200)
     if not ultrasonic.start():
         print("[경고] 초음파 센서 포트 연결 실패! 아두이노 포트(/dev/ttyACM1 등)를 점검하세요.")
 
