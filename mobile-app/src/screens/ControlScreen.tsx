@@ -145,7 +145,7 @@ export function RobotControlScreen({
               </Text>
 
               <Text style={styles.title}>
-                주행 제어
+                주행 관리
               </Text>
 
               <Text style={styles.deviceName}>
@@ -253,10 +253,10 @@ export function RobotControlScreen({
                 ]}
               >
                 {isConnected
-                  ? 'BLE 연결됨'
+                  ? 'BLE 연결'
                   : isConnecting
                     ? 'BLE 연결 중'
-                    : 'BLE 끊김'}
+                    : 'BLE 미연결'}
               </Text>
             </View>
 
@@ -299,10 +299,10 @@ export function RobotControlScreen({
                 ]}
               >
                 {hc12Connected
-                  ? 'HC-12 정상'
+                  ? 'HC-12 연결'
                   : hc12Connecting
-                    ? 'HC-12 확인 중'
-                    : 'HC-12 미확인'}
+                    ? 'HC-12 연결 중'
+                    : 'HC-12 미연결'}
               </Text>
             </View>
           </View>
@@ -419,6 +419,7 @@ const styles = StyleSheet.create({
   // =========================
 
   header: {
+    paddingTop: 24,
     marginBottom:
       spacing.lg,
   },

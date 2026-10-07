@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   PermissionsAndroid,
   Platform,
@@ -53,6 +53,32 @@ export default function HomeScreen() {
     connectionStatus,
     setConnectionStatus,
   ] = useState<ConnectionStatus>('disconnected');
+
+  const [
+    hc12Status,
+    setHc12Status,
+  ] = useState<ConnectionStatus>('disconnected');
+
+  const hc12LastSeenRef = useRef<number>(0);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (hc12Status !== 'connected') {
+        return;
+      }
+
+      const elapsed =
+        Date.now() - hc12LastSeenRef.current;
+
+      if (elapsed > 3000) {
+        setHc12Status('disconnected');
+      }
+    }, 1000);
+
+    return () => {
+      clearInterval(timer);
+    };
+  }, [hc12Status]);
 
   // =========================
   // 거리
@@ -207,6 +233,12 @@ export default function HomeScreen() {
       'ESP32 -> APP:',
       message
     );
+
+    if (message === 'HC12_CONNECTED') {
+      hc12LastSeenRef.current = Date.now();
+      setHc12Status('connected');
+      return;
+    }
 
     // ---------------------------------
     // 실제 엔코더 거리
@@ -439,6 +471,8 @@ export default function HomeScreen() {
                 setConnectionStatus(
                   'disconnected'
                 );
+
+                setHc12Status('disconnected');
 
                 setRobotStatus(
                   'idle'
@@ -719,7 +753,7 @@ export default function HomeScreen() {
         connectionStatus
       }
 
-      hc12Status={undefined}
+      hc12Status={hc12Status}
 
       robotStatus={
         robotStatus
