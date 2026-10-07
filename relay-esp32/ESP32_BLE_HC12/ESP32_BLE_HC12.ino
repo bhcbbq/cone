@@ -6,8 +6,8 @@
 HardwareSerial HC12(2);
 
 #define SERVICE_UUID "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
-#define RX_UUID      "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
-#define TX_UUID      "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
+#define RX_UUID "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
+#define TX_UUID "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
 
 BLECharacteristic *txCharacteristic;
 
@@ -33,12 +33,12 @@ class RXCallback : public BLECharacteristicCallbacks {
 };
 
 class ServerCallbacks : public BLEServerCallbacks {
-  void onConnect(BLEServer* pServer) override {
+  void onConnect(BLEServer *pServer) override {
     deviceConnected = true;
     Serial.println("BLE CONNECTED");
   }
 
-  void onDisconnect(BLEServer* pServer) override {
+  void onDisconnect(BLEServer *pServer) override {
     deviceConnected = false;
     Serial.println("BLE DISCONNECTED");
 
@@ -78,9 +78,7 @@ void setup() {
   BLECharacteristic *rxCharacteristic =
     service->createCharacteristic(
       RX_UUID,
-      BLECharacteristic::PROPERTY_WRITE |
-      BLECharacteristic::PROPERTY_WRITE_NR
-    );
+      BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
 
   rxCharacteristic->setCallbacks(new RXCallback());
 
@@ -88,8 +86,7 @@ void setup() {
   txCharacteristic =
     service->createCharacteristic(
       TX_UUID,
-      BLECharacteristic::PROPERTY_NOTIFY
-    );
+      BLECharacteristic::PROPERTY_NOTIFY);
 
   txCharacteristic->addDescriptor(new BLE2902());
 
@@ -117,12 +114,15 @@ void loop() {
         Serial.print("HC12 -> ESP32 : ");
         Serial.println(hc12Buffer);
 
+        // HC-12 응답이 실제로 들어왔으므로 연결됨으로 판단
+        sendToPhone("HC12_CONNECTED");
+
+        // 원래 메시지도 그대로 앱으로 전달
         sendToPhone(hc12Buffer);
       }
 
       hc12Buffer = "";
-    }
-    else if (c != '\r') {
+    } else if (c != '\r') {
       hc12Buffer += c;
     }
   }

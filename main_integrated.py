@@ -16,7 +16,7 @@ import ugv_control
 BASE_SPEED = 0.30
 
 # 대략적인 180도 회전 속도
-TURN_SPEED = 0.35
+TURN_SPEED = 0.25
 
 # 영상 정렬 시 천천히 회전
 ALIGN_TURN_SPEED = 0.18
