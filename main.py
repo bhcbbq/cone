@@ -118,8 +118,8 @@ if __name__ == "__main__":
 
             roi_vertices = [
                 (0, height), 
-                (int(width * 0.2), int(height * 0.45)),
-                (int(width * 0.8), int(height * 0.45)), 
+                (int(width * 0.05), int(height * 0.25)),
+                (int(width * 0.95), int(height * 0.25)), 
                 (width, height)
             ]
             
