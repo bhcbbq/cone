@@ -50,13 +50,16 @@ export function ControlButtons({
     robotStatus === 'driving';
 
   const isReturning =
-    robotStatus ===
-    'returning';
+    robotStatus === 'returning';
 
+  // 일반 주행 또는 복귀 중
   const isBusy =
     isDriving || isReturning;
 
+  // =========================
   // START 가능 상태
+  // =========================
+
   const canStart =
     isBleConnected &&
     targetDistance > 0 &&
@@ -64,30 +67,35 @@ export function ControlButtons({
       robotStatus === 'idle' ||
       robotStatus === 'stopped' ||
       robotStatus === 'arrived' ||
-      robotStatus ===
-      'returnCompleted'
+      robotStatus === 'returnCompleted'
     );
 
-  // 주행 중에는 같은 버튼이 STOP
+  // 주행 중 / 복귀 중에는 같은 버튼이 STOP
   const mainButtonEnabled =
     isBusy || canStart;
 
-  // RESET은 움직이는 중에는 비활성
+  // 일반 주행 중에는 RESET 금지
+  // 복귀 중에는 RESET 가능
   const canReset =
     !isDriving;
 
-  // RETURN은 아직 실제 기능 안 붙었으면
-  // "준비 중" 상태로 표시
+  // 도착했을 때만 RETURN 가능
   const canReturn =
     !!onReturn &&
     robotStatus === 'arrived';
 
+  // =========================
+  // START / STOP
+  // =========================
+
   const handleMainPress = () => {
+    // 일반 주행 / 복귀 중이면 STOP
     if (isBusy) {
       onStop();
       return;
     }
 
+    // 나머지는 START
     if (canStart) {
       onStart();
     }
@@ -162,6 +170,8 @@ export function ControlButtons({
           styles.secondaryRow
         }
       >
+        {/* RESET */}
+
         <Pressable
           onPress={
             onResetDistance
@@ -170,21 +180,19 @@ export function ControlButtons({
             !onResetDistance ||
             !canReset
           }
-          style={({
-            pressed,
-          }) => [
-              styles.secondaryButton,
+          style={({ pressed }) => [
+            styles.secondaryButton,
 
-              (!onResetDistance ||
-                !canReset) &&
-              styles.secondaryButtonDisabled,
+            (!onResetDistance ||
+              !canReset) &&
+            styles.secondaryButtonDisabled,
 
-              pressed &&
-              onResetDistance &&
-              canReset && {
-                opacity: 0.82,
-              },
-            ]}
+            pressed &&
+            onResetDistance &&
+            canReset && {
+              opacity: 0.82,
+            },
+          ]}
         >
           <Ionicons
             name="refresh"
@@ -211,9 +219,15 @@ export function ControlButtons({
           </Text>
         </Pressable>
 
+        {/* RETURN */}
+
         <Pressable
-          onPress={onReturn}
-          disabled={!canReturn}
+          onPress={
+            onReturn
+          }
+          disabled={
+            !canReturn
+          }
           style={({ pressed }) => [
             styles.secondaryButton,
             styles.returnButton,
@@ -272,7 +286,9 @@ export function ControlButtons({
 
       {!isBleConnected && (
         <Text
-          style={styles.hint}
+          style={
+            styles.hint
+          }
         >
           ESP32와 연결되어야
           주행을 시작할 수 있습니다.
