@@ -118,7 +118,7 @@ if __name__ == "__main__":
 
             roi_vertices = [
                 (0, height), 
-                (int(width * 0.05), int(height * 0.25)),
+                (int(width * 0.05), int(height * 0.25)), #인식범위 높일거면 height * 0.1
                 (int(width * 0.95), int(height * 0.25)), 
                 (width, height)
             ]
