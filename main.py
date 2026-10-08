@@ -10,7 +10,7 @@ import ugv_control
 # 기본 설정 및 스레드 간 데이터 공유 변수
 BASE_SPEED = 0.3  
 shared_error = 0            
-shared_speed = 0.0          
+shared_speed = 0.0
 error_lock = threading.Lock()
 is_running = True
 
@@ -97,8 +97,8 @@ if __name__ == "__main__":
     control_thread.start()
 
     # SSH 환경 테스트를 위한 GUI 출력 관련 주석 유지
-    # window_name = 'Future Makers - UGV02 Autonomous Driving'
-    # cv2.namedWindow(window_name)
+    window_name = 'Future Makers - UGV02 Autonomous Driving'
+    cv2.namedWindow(window_name)
 
     print("[알림] 카메라 및 자율주행 시스템이 정상 구동 중입니다. (강제 종료는 Ctrl+C)")
 
@@ -137,9 +137,9 @@ if __name__ == "__main__":
                     shared_speed = 0.0
 
             # cv2.imshow(window_name, result_image)
-            # if cv2.waitKey(1) & 0xFF == ord('q'):
-            #     print("[알림] 사용자가 'q'를 눌러 프로그램을 종료했습니다.")
-            #     break
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                print("[알림] 사용자가 'q'를 눌러 프로그램을 종료했습니다.")
+                break
 
     except KeyboardInterrupt:
         print("\n[알림] 강제 종료(Ctrl+C) 신호를 감지했습니다.")
