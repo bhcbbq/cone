@@ -136,7 +136,7 @@ if __name__ == "__main__":
                 else:
                     shared_speed = 0.0
 
-            # cv2.imshow(window_name, result_image)
+            cv2.imshow(window_name, result_image)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 print("[알림] 사용자가 'q'를 눌러 프로그램을 종료했습니다.")
                 break
