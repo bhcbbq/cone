@@ -8,7 +8,7 @@ import lane_detection
 import ugv_control
 
 # 기본 설정 및 스레드 간 데이터 공유 변수
-BASE_SPEED = 0.3  
+BASE_SPEED = 0.5  
 shared_error = 0            
 shared_speed = 0.0
 error_lock = threading.Lock()
@@ -118,7 +118,7 @@ if __name__ == "__main__":
 
             roi_vertices = [
                 (0, height), 
-                (int(width * 0.05), int(height * 0.25)),
+                (int(width * 0.05), int(height * 0.25)), #인식범위 높일거면 height * 0.1
                 (int(width * 0.95), int(height * 0.25)), 
                 (width, height)
             ]
