@@ -98,6 +98,9 @@ return_drive_start_odr = None
 
 align_stable_count = 0
 
+# 복귀 중 STOP 후 재개할 단계 저장
+paused_return_mode = None
+
 lane_lost_printed = False
 
 
@@ -185,6 +188,7 @@ def hc12_thread_task():
     global return_turn_start_odr
 
     global align_stable_count
+    global paused_return_mode
 
     buffer = ""
 
@@ -231,6 +235,7 @@ def hc12_thread_task():
                             mode = "IDLE"
                             stop_pending = False
                             align_stable_count = 0
+                            paused_return_mode = None
 
                         send_raw_ugv('{"T":0}')
 
@@ -248,19 +253,32 @@ def hc12_thread_task():
 
                         with state_lock:
 
+                            # 복귀 중 STOP이면 현재 복귀 단계를 기억하고 일시정지
+                            if mode in (
+                                "RETURN_TURN",
+                                "RETURN_ALIGN",
+                                "RETURN_DRIVE",
+                            ):
+                                paused_return_mode = mode
+                                stop_pending = False
+                                was_returning = True
+                            else:
+                                paused_return_mode = None
+                                stop_pending = True
+                                paused_mission = True
+                                was_returning = False
+
                             mode = "IDLE"
-
-                            stop_pending = True
-
-                            paused_mission = True
-
                             align_stable_count = 0
 
                         stop_ugv_now()
 
-                        print("[정지] UGV STOP")
-
-                        print("[정지] 최종 엔코더 거리 대기")
+                        if was_returning:
+                            send_hc12("RETURN_PAUSED")
+                            print("[RETURN] 일시정지")
+                        else:
+                            print("[정지] UGV STOP")
+                            print("[정지] 최종 엔코더 거리 대기")
 
                         continue
 
@@ -361,6 +379,7 @@ def hc12_thread_task():
                             return_turn_start_odr = current_odr
 
                             align_stable_count = 0
+                            paused_return_mode = None
 
                             mode = "RETURN_TURN"
 
@@ -371,6 +390,32 @@ def hc12_thread_task():
                         print("[RETURN] 대략적인 180도 회전 시작")
 
                         print("[RETURN] 복귀거리:", f"{return_drive_distance:.2f} m")
+
+                        continue
+
+                    # ==================================================
+                    # RESUME RETURN
+                    # ==================================================
+
+                    if cmd == "RESUME_RETURN":
+
+                        with state_lock:
+
+                            if paused_return_mode is None:
+
+                                print("[RETURN] 일시정지된 복귀 없음")
+
+                                send_hc12("RETURN_ERROR:NO_PAUSED_RETURN")
+
+                                continue
+
+                            mode = paused_return_mode
+                            paused_return_mode = None
+                            stop_pending = False
+
+                        send_hc12("RETURNING")
+
+                        print("[RETURN] 복귀 재개:", mode)
 
                         continue
 
@@ -390,6 +435,7 @@ def hc12_thread_task():
 
                             paused_mission = False
                             align_stable_count = 0
+                            paused_return_mode = None
 
                         send_hc12("DISTANCE:0.00")
 
@@ -433,6 +479,7 @@ def ugv_receive_thread_task():
 
     global return_drive_start_odl
     global return_drive_start_odr
+    global paused_return_mode
 
     print("[알림] UGV 수신 스레드 시작")
 
@@ -590,6 +637,7 @@ def ugv_receive_thread_task():
                                 send_hc12("RETURNED")
 
                                 paused_mission = False
+                                paused_return_mode = None
 
                                 print("[RETURN] 복귀 완료")
 

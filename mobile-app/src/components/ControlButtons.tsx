@@ -82,7 +82,10 @@ export function ControlButtons({
   // 도착했을 때만 RETURN 가능
   const canReturn =
     !!onReturn &&
-    robotStatus === 'arrived';
+    (
+      robotStatus === 'arrived' ||
+      robotStatus === 'stopped'
+    );
 
   // =========================
   // START / STOP
