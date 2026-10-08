@@ -8,7 +8,7 @@ import lane_detection
 import ugv_control
 
 # 기본 설정 및 스레드 간 데이터 공유 변수
-BASE_SPEED = 0.3  
+BASE_SPEED = 0.5  
 shared_error = 0            
 shared_speed = 0.0
 error_lock = threading.Lock()
