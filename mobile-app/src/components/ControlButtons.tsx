@@ -65,16 +65,16 @@ export function ControlButtons({
       robotStatus === 'stopped' ||
       robotStatus === 'arrived' ||
       robotStatus ===
-        'returnCompleted'
+      'returnCompleted'
     );
 
   // 주행 중에는 같은 버튼이 STOP
   const mainButtonEnabled =
-    isDriving || canStart;
+    isBusy || canStart;
 
   // RESET은 움직이는 중에는 비활성
   const canReset =
-    !isBusy;
+    !isDriving;
 
   // RETURN은 아직 실제 기능 안 붙었으면
   // "준비 중" 상태로 표시
@@ -83,7 +83,7 @@ export function ControlButtons({
     robotStatus === 'arrived';
 
   const handleMainPress = () => {
-    if (isDriving) {
+    if (isBusy) {
       onStop();
       return;
     }
@@ -109,22 +109,22 @@ export function ControlButtons({
         style={({ pressed }) => [
           styles.mainButton,
 
-          isDriving
+          isBusy
             ? styles.stopButton
             : styles.startButton,
 
           !mainButtonEnabled &&
-            styles.mainButtonDisabled,
+          styles.mainButtonDisabled,
 
           pressed &&
-            mainButtonEnabled && {
-              opacity: 0.9,
-            },
+          mainButtonEnabled && {
+            opacity: 0.9,
+          },
         ]}
       >
         <Ionicons
           name={
-            isDriving
+            isBusy
               ? 'stop'
               : 'play'
           }
@@ -147,7 +147,7 @@ export function ControlButtons({
             },
           ]}
         >
-          {isDriving
+          {isBusy
             ? 'STOP'
             : 'START'}
         </Text>
@@ -173,18 +173,18 @@ export function ControlButtons({
           style={({
             pressed,
           }) => [
-            styles.secondaryButton,
+              styles.secondaryButton,
 
-            (!onResetDistance ||
-              !canReset) &&
+              (!onResetDistance ||
+                !canReset) &&
               styles.secondaryButtonDisabled,
 
-            pressed &&
+              pressed &&
               onResetDistance &&
               canReset && {
                 opacity: 0.82,
               },
-          ]}
+            ]}
         >
           <Ionicons
             name="refresh"
@@ -219,12 +219,12 @@ export function ControlButtons({
             styles.returnButton,
 
             !canReturn &&
-              styles.secondaryButtonDisabled,
+            styles.secondaryButtonDisabled,
 
             pressed &&
-              canReturn && {
-                opacity: 0.82,
-              },
+            canReturn && {
+              opacity: 0.82,
+            },
           ]}
         >
           <Ionicons
