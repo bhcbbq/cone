@@ -16,7 +16,7 @@ BASE_SPEED = 0.30
 
 # 복귀 U턴 속도
 # 양쪽 바퀴 모두 전진시키고 속도 차이로 크게 회전
-RETURN_INNER_SPEED = 0.10
+RETURN_INNER_SPEED = 0.28
 RETURN_OUTER_SPEED = 0.30
 
 # 영상 정렬 시 천천히 회전
@@ -24,7 +24,7 @@ ALIGN_TURN_SPEED = 0.18
 
 # 크게 U턴할 때의 엔코더 기준 거리
 # 실제 회전각을 보면서 조정
-COARSE_TURN_DISTANCE_M = 0.90
+COARSE_TURN_DISTANCE_M = 2.0
 
 # 차선 중심 오차 허용 범위
 # 실제 테스트하면서 조정
