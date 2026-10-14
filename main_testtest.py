@@ -1,7 +1,25 @@
+# main_test.py
+# UGV02 lane following + in-lane obstacle avoidance
+#
+# Interfaces verified against the supplied files:
+#   lane_detection.py:
+#       calculate_steering(frame, lines) -> (error, frame, is_detected)
+#   ugv_control.py:
+#       init_ugv(port, baudrate) -> serial.Serial
+#       read_odometry(ser, dt)
+#       calculate_pid(current_error, previous_error, dt)
+#       send_driving_command(ser, base_speed, angular_z)
+#       stop_ugv(ser)
+#   ultrasonic_reader.py:
+#       UltrasonicReader(port, baudrate), start(), get_distances(), stop()
+
 import cv2
 import time
 import threading
+import traceback
+import math
 import numpy as np
+from enum import Enum, auto
 
 import lane_detection
 import ugv_control
@@ -9,1500 +27,611 @@ from ultrasonic_reader import UltrasonicReader
 
 
 # ============================================================
-# 기본 주행 설정
+# Configuration
 # ============================================================
 
-BASE_SPEED = 0.25
-AVOID_SPEED = 0.12
-TURN_ANGULAR_SPEED = 0.5
+UGV_PORT = "/dev/ttyACM0"
+ULTRASONIC_PORT = "/dev/ttyUSB0"
+SERIAL_BAUD = 115200
+
+CAMERA_WIDTH = 640
+CAMERA_HEIGHT = 480
+CAMERA_FPS = 30
+
+LANE_WIDTH_CM = 70.0
+VEHICLE_WIDTH_CM = 21.0
+MIN_LANE_CLEARANCE_CM = 25.0  # 차체 21cm + 여유 4cm
+
+FRONT_STOP_CM = 35.0
+OBSTACLE_CLEAR_CM = 50.0
+OBSTACLE_CLEAR_HOLD_S = 0.5
+
+NORMAL_SPEED = 0.15       # m/s
+AVOID_SPEED = 0.08        # m/s (S자 회전 및 복귀 시 속도)
+PASS_SPEED = 0.12         # m/s (장애물 옆 직진 통과 속도)
+
+TURN_OUT_TIME_S = 0.25    # S자 회피 1단계 시간 (대각선 틀기)
+ALIGN_TIME_S = 0.25       # S자 회피 2단계 시간 (차선과 평행 정렬)
+TURN_ANGULAR_SPEED = 1.0  # rad/s (마찰 극복 각속도)
+PASS_DISTANCE_CM = 70.0   # 장애물 측면 오도메트리/타이머 통과 거리
+PASS_TIMEOUT_S = PASS_DISTANCE_CM / (PASS_SPEED * 100.0)
+RECOVERY_TIMEOUT_S = 5.0
+
+CONTROL_PERIOD_S = 0.02
+CAMERA_PERIOD_S = 0.03
+NO_OBSTACLE = -1.0
+
+# CSI camera GStreamer pipeline (640x480 output)
+GST_PIPELINE = (
+    "nvarguscamerasrc ! "
+    "video/x-raw(memory:NVMM), width=1280, height=720, "
+    "format=NV12, framerate=30/1 ! "
+    "nvvidconv ! "
+    "video/x-raw, width=640, height=480, format=BGRx ! "
+    "videoconvert ! "
+    "video/x-raw, format=BGR ! "
+    "appsink drop=true max-buffers=1 sync=false"
+)
 
 
-# ============================================================
-# 초음파 장애물 판단 기준 (cm)
-# ============================================================
-
-FRONT_OBSTACLE_THRESH = 35.0
-EMERGENCY_FRONT_THRESH = 20.0
-
-# 좌/우 센서가 이 거리 이상이면 회피 가능하다고 판단
-SIDE_SAFE_THRESH = 25.0
-
-# 회피 중 이 거리 이하가 되면 즉시 정지
-SIDE_DANGER_THRESH = 20.0
-
-# 정면 장애물이 이 거리보다 멀어지면
-# 장애물을 통과했다고 판단
-OBSTACLE_CLEAR_THRESH = 45.0
-
-# 장애물 통과를 몇 번 연속 확인할지
-CLEAR_CONFIRM_COUNT = 3
-
-# 한 번의 회피 전진을 허용하는 최대 시간
-MAX_AVOID_FORWARD_TIME = 3.0
+class State(Enum):
+    LANE_FOLLOWING = auto()
+    CHECK_OBSTACLE = auto()
+    AVOID_TURN_OUT = auto()
+    AVOID_ALIGN = auto()
+    AVOID_FORWARD = auto()
+    RECOVERY_TURN = auto()
+    BLOCKED_STOP = auto()
 
 
-# ============================================================
-# 회피 동작 시간
-# 실제 UGV 테스트 후 조정 필요
-# ============================================================
-
-AVOID_TURN_TIME = 0.4
-RECOVERY_TURN_TIME = 0.4
+class AvoidDirection(Enum):
+    LEFT = -1
+    RIGHT = 1
 
 
-# ============================================================
-# 장애물 감지 직후 센서 안정화 시간
-# ============================================================
-
-OBSTACLE_CHECK_DELAY = 0.5
-
-
-# ============================================================
-# State Machine
-# ============================================================
-
-STATE_LANE_FOLLOWING = "LANE_FOLLOWING"
-STATE_CHECK_OBSTACLE = "CHECK_OBSTACLE"
-STATE_AVOID_TURN = "AVOID_TURN"
-STATE_AVOID_FORWARD = "AVOID_FORWARD"
-STATE_RECOVERY_TURN = "RECOVERY_TURN"
-STATE_BLOCKED_STOP = "BLOCKED_STOP"
-
-current_state = STATE_LANE_FOLLOWING
-
-
-# ============================================================
-# 공유 제어 변수
-# ============================================================
-
-shared_error = 0
+# Shared control state
+shared_lock = threading.Lock()
+shared_error = 0.0
 shared_speed = 0.0
-shared_angular_override = None
+# None = PID steering; 0.0 = forced straight; nonzero = forced turn
+shared_angular_override = 0.0
+shutdown_event = threading.Event()
 
-error_lock = threading.Lock()
-is_running = True
-
-
-# ============================================================
-# 하드웨어 객체
-# ============================================================
-
-ugv_serial = None
-ultrasonic = None
+state = State.LANE_FOLLOWING
+state_enter_time = time.monotonic()
+avoid_direction = None
+last_lane_space = (None, None)
+obstacle_clear_since = None
+last_blocked_log_time = 0.0
 
 
-# ============================================================
-# 거리값 처리
-# ============================================================
-
-def normalize_distance(distance):
-    """
-    초음파 거리값을 안전하게 float으로 변환한다.
-
-    반환값:
-        정상 거리 -> 양수
-        측정 불가/잘못된 값 -> -1
-    """
-
-    try:
-        distance = float(distance)
-    except (TypeError, ValueError):
-        return -1.0
-
-    if distance <= 0:
-        return -1.0
-
-    return distance
-
-
-# ============================================================
-# 모터 제어 백그라운드 스레드
-# ============================================================
-
-def control_thread_task():
-
-    global shared_error
-    global shared_speed
-    global shared_angular_override
-    global is_running
-
-    previous_error = 0
-    last_time = time.time()
-
-    print("[알림] 제어 백그라운드 스레드 시작")
-
-    while is_running:
-
-        current_time = time.time()
-
-        dt = current_time - last_time
-
-        if dt <= 0:
-            dt = 0.001
-
-        last_time = current_time
-
-
-        # ----------------------------------------------------
-        # UGV Odometry
-        # ----------------------------------------------------
-
-        if ugv_serial:
-
-            ugv_control.read_odometry(
-                ugv_serial,
-                dt
-            )
-
-
-        # ----------------------------------------------------
-        # 공유 변수 읽기
-        # ----------------------------------------------------
-
-        with error_lock:
-
-            c_error = shared_error
-            c_speed = shared_speed
-            c_override = shared_angular_override
-
-
-        # ----------------------------------------------------
-        # 조향 계산
-        # ----------------------------------------------------
-
-        if c_override is not None:
-
-            # 회피 동작 등에서 강제 조향
-            angular_z = c_override
-
-        else:
-
-            # 정상 주행에서는 PID 차선 조향
-            angular_z = ugv_control.calculate_pid(
-                c_error,
-                previous_error,
-                dt
-            )
-
-            previous_error = c_error
-
-
-        # ----------------------------------------------------
-        # 주행 명령
-        # ----------------------------------------------------
-
-        if ugv_serial:
-
-            if c_speed != 0.0 or c_override is not None:
-
-                send_angular = angular_z
-
-            else:
-
-                send_angular = 0.0
-
-
-            ugv_control.send_driving_command(
-                ugv_serial,
-                c_speed,
-                send_angular
-            )
-
-
-        time.sleep(0.02)
-
-
-# ============================================================
-# CSI Camera GStreamer Pipeline
-# ============================================================
-
-def gstreamer_pipeline(
-    sensor_id=0,
-    capture_width=1280,
-    capture_height=720,
-    display_width=640,
-    display_height=360,
-    framerate=30,
-    flip_method=0,
-):
-
-    return (
-
-        "nvarguscamerasrc sensor-id=%d ! "
-
-        "video/x-raw(memory:NVMM), "
-        "width=(int)%d, "
-        "height=(int)%d, "
-        "framerate=(fraction)%d/1 ! "
-
-        "nvvidconv flip-method=%d ! "
-
-        "video/x-raw, "
-        "width=(int)%d, "
-        "height=(int)%d, "
-        "format=(string)BGRx ! "
-
-        "videoconvert ! "
-
-        "video/x-raw, "
-        "format=(string)BGR ! "
-
-        "appsink"
-
-        % (
-            sensor_id,
-            capture_width,
-            capture_height,
-            framerate,
-            flip_method,
-            display_width,
-            display_height,
+def set_command(speed, angular_override, error=None):
+    global shared_speed, shared_angular_override, shared_error
+    with shared_lock:
+        shared_speed = float(speed)
+        shared_angular_override = (
+            None if angular_override is None else float(angular_override)
         )
-    )
+        if error is not None:
+            shared_error = float(error)
 
 
-# ============================================================
-# 메인
-# ============================================================
-
-if __name__ == "__main__":
-
-    # ========================================================
-    # 1. UGV02 연결
-    # ========================================================
-
-    ugv_serial = ugv_control.init_ugv(
-        port="/dev/ttyACM0",
-        baudrate=115200
-    )
-
-    if not ugv_serial:
-
-        print("[종료] UGV02 연결 실패")
-        print("[확인] /dev/ttyACM0 포트를 확인하세요.")
-
-        raise SystemExit
+def force_stop():
+    set_command(0.0, 0.0)
 
 
-    # ========================================================
-    # 2. Arduino 초음파 센서 연결
-    # ========================================================
-
-    ultrasonic = UltrasonicReader(
-        port="/dev/ttyUSB0",
-        baudrate=115200
-    )
-
-    sensors_ready = ultrasonic.start()
-
-    if not sensors_ready:
-
-        print("[경고] 초음파 센서 연결 실패!")
-        print("[확인] /dev/ttyUSB0 포트를 확인하세요.")
-        print("[안전] 초음파가 없으므로 주행하지 않습니다.")
+def transition(new_state):
+    global state, state_enter_time
+    state = new_state
+    state_enter_time = time.monotonic()
+    print(f"[FSM] -> {state.name}")
 
 
-    # ========================================================
-    # 3. CSI 카메라 연결
-    # ========================================================
+def state_elapsed():
+    return time.monotonic() - state_enter_time
 
-    pipeline = gstreamer_pipeline(
-        flip_method=0
-    )
 
-    cap = cv2.VideoCapture(
-        pipeline,
-        cv2.CAP_GSTREAMER
-    )
-
+def open_camera():
+    cap = cv2.VideoCapture(GST_PIPELINE, cv2.CAP_GSTREAMER)
     if not cap.isOpened():
-
-        print("[에러] CSI 카메라 초기화 실패!")
-
-        if ultrasonic:
-            ultrasonic.stop()
-
-        ugv_control.stop_ugv(
-            ugv_serial
+        raise RuntimeError(
+            "CSI 카메라를 열 수 없습니다. GStreamer 파이프라인/카메라 연결을 확인하세요."
         )
+    return cap
 
-        raise SystemExit
 
+# ============================================================
+# Vision: create Hough line segments & estimate space
+# ============================================================
 
-    # ========================================================
-    # 4. 모터 제어 스레드 시작
-    # ========================================================
+def detect_hough_lines(frame):
+    """Return Hough segments in the shape expected by lane_detection.py."""
+    height, width = frame.shape[:2]
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(blur, 50, 150)
 
-    control_thread = threading.Thread(
-        target=control_thread_task,
-        daemon=True
+    # Restrict detection to the lower road region.
+    mask = np.zeros_like(edges)
+    polygon = np.array([[
+        (int(width * 0.05), height - 1),
+        (int(width * 0.40), int(height * 0.48)),
+        (int(width * 0.60), int(height * 0.48)),
+        (int(width * 0.95), height - 1),
+    ]], dtype=np.int32)
+    cv2.fillPoly(mask, polygon, 255)
+    roi_edges = cv2.bitwise_and(edges, mask)
+
+    lines = cv2.HoughLinesP(
+        roi_edges,
+        rho=1,
+        theta=np.pi / 180,
+        threshold=35,
+        minLineLength=25,
+        maxLineGap=45,
     )
-
-    control_thread.start()
-
-
-    # ========================================================
-    # 초기 상태 변수
-    # ========================================================
-
-    avoid_direction = None
-
-    state_timer = time.time()
-
-    avoid_forward_start_time = None
-
-    clear_confirm_counter = 0
+    return lines
 
 
-    print()
-    print("============================================")
-    print(" UGV02 자율주행 시스템 시작")
-    print("============================================")
-    print(" Camera : 차선 인식 / PID")
-    print(" Left US : 좌측 장애물")
-    print(" Front US: 정면 장애물")
-    print(" Right US: 우측 장애물")
-    print("============================================")
+def line_x_at_y(line, y):
+    values = np.asarray(line).reshape(-1)
+    if len(values) < 4:
+        return None
+    x1, y1, x2, y2 = map(float, values[:4])
+    if abs(y2 - y1) < 1e-6:
+        return (x1 + x2) / 2.0
+    return x1 + (y - y1) * (x2 - x1) / (y2 - y1)
 
 
-    # ========================================================
-    # 메인 루프
-    # ========================================================
+def estimate_lane_boundaries(lines, image_width, image_height):
+    """Estimate lane boundary x positions at y=75% of the image."""
+    if lines is None:
+        return None, None
+
+    y_eval = int(image_height * 0.75)
+    center = image_width / 2.0
+    left_xs, right_xs = [], []
 
     try:
+        segments = np.asarray(lines).reshape(-1, 4)
+    except (ValueError, TypeError):
+        return None, None
 
-        while cap.isOpened():
+    for segment in segments:
+        x1, y1, x2, y2 = map(float, segment)
+        dx = x2 - x1
+        dy = y2 - y1
+        if abs(dx) < 1e-6:
+            continue
+        slope = dy / dx
+        if abs(slope) < 0.5:
+            continue
+        x = line_x_at_y(segment, y_eval)
+        if x is None or not (0 <= x < image_width):
+            continue
+        if slope < 0 and x < center:
+            left_xs.append(x)
+        elif slope > 0 and x > center:
+            right_xs.append(x)
 
-            # =================================================
-            # A. 카메라 프레임
-            # =================================================
+    if not left_xs or not right_xs:
+        return None, None
 
-            ret, frame = cap.read()
-
-            if not ret:
-
-                print(
-                    "[에러] 카메라 프레임 수신 실패"
-                )
-
-                with error_lock:
-
-                    shared_speed = 0.0
-
-                    shared_angular_override = 0.0
-
-                break
+    x_left = float(np.median(left_xs))
+    x_right = float(np.median(right_xs))
+    if x_right <= x_left:
+        return None, None
+    return x_left, x_right
 
 
-            # =================================================
-            # B. 초음파 거리
-            # =================================================
+def estimate_lane_space(frame, lines):
+    """
+    Estimate free space left/right of the largest WHITE or BLACK obstacle contour.
+    """
+    height, width = frame.shape[:2]
+    x_left, x_right = estimate_lane_boundaries(lines, width, height)
+    if x_left is None or x_right is None:
+        return None, None
 
-            if sensors_ready:
+    lane_px = x_right - x_left
+    if lane_px <= 1:
+        return None, None
+    cm_per_px = LANE_WIDTH_CM / lane_px
 
-                left_d, front_d, right_d = (
-                    ultrasonic.get_distances()
-                )
+    # Crop road area inside the estimated lane.
+    y1, y2 = int(height * 0.52), int(height * 0.84)
+    x1, x2 = max(0, int(x_left)), min(width, int(x_right))
+    if x2 <= x1 or y2 <= y1:
+        return None, None
 
-                left_d = normalize_distance(
-                    left_d
-                )
+    roi = frame[y1:y2, x1:x2]
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
 
-                front_d = normalize_distance(
-                    front_d
-                )
+    # =========================================================
+    # [수정] 흰색 및 검은색 장애물 전용 HSV 마스크
+    # =========================================================
+    # 1. 흰색 마스크 (채도 S: 0~50, 명도 V: 180~255)
+    mask_white = cv2.inRange(
+        hsv, 
+        np.array([0, 0, 180], np.uint8),
+        np.array([179, 50, 255], np.uint8)
+    )
 
-                right_d = normalize_distance(
-                    right_d
-                )
+    # 2. 검은색 마스크 (명도 V: 0~60)
+    mask_black = cv2.inRange(
+        hsv, 
+        np.array([0, 0, 0], np.uint8),
+        np.array([179, 255, 60], np.uint8)
+    )
 
+    # 흰색 + 검은색 영역 결합
+    mask = cv2.bitwise_or(mask_white, mask_black)
+
+    # 노이즈 제거 (Opening/Closing)
+    kernel = np.ones((5, 5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+    contours, _ = cv2.findContours(
+        mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    min_area = max(30, int((x2 - x1) * (y2 - y1) * 0.001))
+    contours = [c for c in contours if cv2.contourArea(c) >= min_area]
+
+    if contours:
+        contour = max(contours, key=cv2.contourArea)
+        bx, by, bw, bh = cv2.boundingRect(contour)
+        obs_left = x1 + bx
+        obs_right = x1 + bx + bw
+    else:
+        # 윤곽선 미검출 시 예외 fallback (15cm 폭 가정)
+        assumed_width_px = 15.0 / cm_per_px
+        obs_center = (x_left + x_right) / 2.0
+        obs_left = obs_center - assumed_width_px / 2.0
+        obs_right = obs_center + assumed_width_px / 2.0
+
+    left_free = max(0.0, (obs_left - x_left) * cm_per_px)
+    right_free = max(0.0, (x_right - obs_right) * cm_per_px)
+    return float(left_free), float(right_free)
+
+
+# ============================================================
+# Ultrasonic sensor
+# ============================================================
+
+def create_ultrasonic_reader():
+    reader = UltrasonicReader(
+        port=ULTRASONIC_PORT,
+        baudrate=SERIAL_BAUD,
+    )
+    if not reader.start():
+        raise RuntimeError("아두이노 초음파 센서 연결에 실패했습니다.")
+    return reader
+
+
+def read_distances(reader):
+    """Return [left, front, right]. -1 means no valid echo."""
+    values = reader.get_distances()
+    if not isinstance(values, (tuple, list)) or len(values) != 3:
+        raise ValueError("get_distances()가 [left, front, right]를 반환하지 않습니다.")
+
+    result = []
+    for value in values:
+        try:
+            d = float(value)
+            if not math.isfinite(d):
+                d = NO_OBSTACLE
+        except (TypeError, ValueError):
+            d = NO_OBSTACLE
+        result.append(d)
+    return tuple(result)
+
+
+def front_obstacle_detected(front_d):
+    return front_d > 0.0 and front_d <= FRONT_STOP_CM
+
+
+# ============================================================
+# Control thread
+# ============================================================
+
+def control_thread_task(ugv_serial):
+    previous_error = 0.0
+    previous_time = time.monotonic()
+
+    while not shutdown_event.is_set():
+        now = time.monotonic()
+        dt = max(now - previous_time, 1e-3)
+        previous_time = now
+
+        with shared_lock:
+            error = shared_error
+            speed = shared_speed
+            override = shared_angular_override
+
+        try:
+            ugv_control.read_odometry(ugv_serial, dt)
+
+            if speed <= 0.0:
+                angular_z = 0.0
+            elif override is not None:
+                angular_z = override
             else:
+                angular_z = ugv_control.calculate_pid(
+                    error, previous_error, dt
+                )
 
-                # 초음파가 연결되지 않았다면
-                # 안전을 위해 정지
-
-                left_d = -1.0
-                front_d = -1.0
-                right_d = -1.0
-
-                with error_lock:
-
-                    shared_speed = 0.0
-
-                    shared_angular_override = 0.0
-
-
-            # =================================================
-            # C. 차선 인식
-            # =================================================
-
-            height, width = frame.shape[:2]
-
-
-            # -------------------------------------------------
-            # Gray
-            # -------------------------------------------------
-
-            gray = cv2.cvtColor(
-                frame,
-                cv2.COLOR_BGR2GRAY
+            previous_error = error
+            ugv_control.send_driving_command(
+                ugv_serial, speed, angular_z
             )
 
+        except Exception as exc:
+            print(f"[CONTROL ERROR] {exc!r}")
+            force_stop()
+            shutdown_event.set()
+            break
 
-            # -------------------------------------------------
-            # Blur
-            # -------------------------------------------------
+        time.sleep(CONTROL_PERIOD_S)
 
-            blur = cv2.GaussianBlur(
-                gray,
-                (5, 5),
-                0
+
+# ============================================================
+# FSM
+# ============================================================
+
+def choose_avoid_direction(left_space, right_space):
+    left_ok = left_space is not None and left_space >= MIN_LANE_CLEARANCE_CM
+    right_ok = right_space is not None and right_space >= MIN_LANE_CLEARANCE_CM
+
+    if not left_ok and not right_ok:
+        return None
+    if left_ok and right_ok:
+        return AvoidDirection.LEFT if left_space >= right_space else AvoidDirection.RIGHT
+    return AvoidDirection.LEFT if left_ok else AvoidDirection.RIGHT
+
+
+def run_fsm(error, is_detected, frame, lines, left_d, front_d, right_d):
+    global last_lane_space, obstacle_clear_since, last_blocked_log_time
+
+    if state in (State.LANE_FOLLOWING, State.CHECK_OBSTACLE):
+        last_lane_space = estimate_lane_space(frame, lines)
+
+    left_space, right_space = last_lane_space
+    now = time.monotonic()
+
+    # [상태 1] 차선 추종 주행
+    if state == State.LANE_FOLLOWING:
+        if front_obstacle_detected(front_d):
+            force_stop()
+            transition(State.CHECK_OBSTACLE)
+        elif not is_detected:
+            force_stop()
+        else:
+            set_command(NORMAL_SPEED, None, error=error)
+        return
+
+    # [상태 2] 여유 공간 평가
+    if state == State.CHECK_OBSTACLE:
+        force_stop()
+        if state_elapsed() < 0.2:
+            return
+
+        if left_space is None or right_space is None:
+            print("[SAFETY] 차선 경계/여유 공간 불명확: 정지 유지")
+            transition(State.BLOCKED_STOP)
+            return
+
+        direction = choose_avoid_direction(left_space, right_space)
+        if direction is None:
+            print(
+                f"[BLOCKED] 좌우 여유 부족 (최소 25cm 필요): L={left_space:.1f}, "
+                f"R={right_space:.1f} cm"
+            )
+            transition(State.BLOCKED_STOP)
+            return
+
+        global avoid_direction
+        avoid_direction = direction
+        print(
+            f"[AVOID] {direction.name}: "
+            f"L={left_space:.1f} cm, R={right_space:.1f} cm"
+        )
+        transition(State.AVOID_TURN_OUT)
+        return
+
+    # [상태 3] S자 회피 1단계: 대각선 틀기 (0.25초)
+    if state == State.AVOID_TURN_OUT:
+        if front_obstacle_detected(front_d):
+            force_stop()
+            transition(State.BLOCKED_STOP)
+            return
+        set_command(AVOID_SPEED, avoid_direction.value * TURN_ANGULAR_SPEED)
+        if state_elapsed() >= TURN_OUT_TIME_S:
+            transition(State.AVOID_ALIGN)
+        return
+
+    # [상태 4] S자 회피 2단계: 차선과 평행 정렬 (0.25초)
+    if state == State.AVOID_ALIGN:
+        if front_obstacle_detected(front_d):
+            force_stop()
+            transition(State.BLOCKED_STOP)
+            return
+        set_command(AVOID_SPEED, -avoid_direction.value * TURN_ANGULAR_SPEED)
+        if state_elapsed() >= ALIGN_TIME_S:
+            transition(State.AVOID_FORWARD)
+        return
+
+    # [상태 5] 3단계: 차선 내 평행 직진 통과 (오도메트리/타이머 기준 45cm)
+    if state == State.AVOID_FORWARD:
+        if front_obstacle_detected(front_d):
+            force_stop()
+            transition(State.BLOCKED_STOP)
+            return
+        set_command(PASS_SPEED, 0.0)
+        if state_elapsed() >= PASS_TIMEOUT_S:
+            force_stop()
+            transition(State.RECOVERY_TURN)
+        return
+
+    # [상태 6] 원래 차선 복귀 회전
+    if state == State.RECOVERY_TURN:
+        if front_obstacle_detected(front_d):
+            force_stop()
+            transition(State.BLOCKED_STOP)
+            return
+
+        if state_elapsed() >= RECOVERY_TIMEOUT_S:
+            force_stop()
+            print("[SAFETY] 차선 복귀 시간 초과: 정지")
+            transition(State.BLOCKED_STOP)
+            return
+
+        if not hasattr(run_fsm, "_recovery_detect_count"):
+            run_fsm._recovery_detect_count = 0
+
+        if is_detected:
+            run_fsm._recovery_detect_count += 1
+        else:
+            run_fsm._recovery_detect_count = 0
+
+        # 연속 5프레임 이상 차선 감지 시 정복귀 처리
+        if run_fsm._recovery_detect_count >= 5:
+            run_fsm._recovery_detect_count = 0
+            force_stop()
+            transition(State.LANE_FOLLOWING)
+            return
+
+        set_command(AVOID_SPEED, -avoid_direction.value * TURN_ANGULAR_SPEED)
+        return
+
+    # [상태 7] 공간 부족 비상 정지
+    if state == State.BLOCKED_STOP:
+        force_stop()
+
+        clear = (front_d > OBSTACLE_CLEAR_CM) or (front_d == NO_OBSTACLE)
+
+        if clear:
+            if obstacle_clear_since is None:
+                obstacle_clear_since = now
+            elif now - obstacle_clear_since >= OBSTACLE_CLEAR_HOLD_S:
+                obstacle_clear_since = None
+                transition(State.LANE_FOLLOWING)
+        else:
+            obstacle_clear_since = None
+
+        if now - last_blocked_log_time >= 1.0:
+            print(f"[BLOCKED_STOP] front={front_d:.1f} cm")
+            last_blocked_log_time = now
+
+
+# ============================================================
+# Main
+# ============================================================
+
+def main():
+    camera = None
+    ugv_serial = None
+    ultrasonic = None
+    control_thread = None
+
+    try:
+        print("[INIT] Connecting to UGV02...")
+        ugv_serial = ugv_control.init_ugv(
+            port=UGV_PORT, baudrate=SERIAL_BAUD
+        )
+        if ugv_serial is None:
+            raise RuntimeError("UGV02 시리얼 연결 실패")
+
+        print("[INIT] Connecting ultrasonic Arduino...")
+        ultrasonic = create_ultrasonic_reader()
+
+        print("[INIT] Opening CSI camera...")
+        camera = open_camera()
+
+        control_thread = threading.Thread(
+            target=control_thread_task,
+            args=(ugv_serial,),
+            name="UGV-Control",
+            daemon=True,
+        )
+        control_thread.start()
+        force_stop()
+
+        print("[READY] q 키를 누르면 정지합니다.")
+
+        while not shutdown_event.is_set():
+            ret, frame = camera.read()
+            if not ret or frame is None:
+                force_stop()
+                print("[CAMERA] 프레임 수신 실패: 정지")
+                time.sleep(0.1)
+                continue
+
+            lines = detect_hough_lines(frame)
+            error, annotated, is_detected = lane_detection.calculate_steering(
+                frame.copy(), lines
             )
 
+            left_d, front_d, right_d = read_distances(ultrasonic)
 
-            # -------------------------------------------------
-            # Canny
-            # -------------------------------------------------
-
-            edges = cv2.Canny(
-                blur,
-                50,
-                150
+            run_fsm(
+                error, is_detected, frame, lines,
+                left_d, front_d, right_d
             )
 
-
-            # -------------------------------------------------
-            # ROI
-            # -------------------------------------------------
-
-            roi_vertices = np.array(
-                [[
-                    (0, height),
-
-                    (
-                        int(width * 0.2),
-                        int(height * 0.45)
-                    ),
-
-                    (
-                        int(width * 0.8),
-                        int(height * 0.45)
-                    ),
-
-                    (width, height)
-                ]],
-                dtype=np.int32
-            )
-
-
-            cropped_edges = (
-                lane_detection.region_of_interest(
-                    edges,
-                    roi_vertices
-                )
-            )
-
-
-            # -------------------------------------------------
-            # Hough Line
-            # -------------------------------------------------
-
-            lines = cv2.HoughLinesP(
-                cropped_edges,
-                rho=1,
-                theta=np.pi / 180,
-                threshold=40,
-                minLineLength=20,
-                maxLineGap=10
-            )
-
-
-            # -------------------------------------------------
-            # 차선 오차 계산
-            # -------------------------------------------------
-
-            (
-                error,
-                result_image,
-                is_detected
-            ) = lane_detection.calculate_steering(
-                frame.copy(),
-                lines
-            )
-
-
-            # =================================================
-            # D. 초음파 센서가 없으면 안전 정지
-            # =================================================
-
-            if not sensors_ready:
-
-                current_state = STATE_BLOCKED_STOP
-
-                avoid_direction = None
-
-                with error_lock:
-
-                    shared_speed = 0.0
-
-                    shared_angular_override = 0.0
-
-
-            # =================================================
-            # STATE 1
-            # 정상 차선 주행
-            # =================================================
-
-            elif current_state == STATE_LANE_FOLLOWING:
-
-                # ------------------------------------------------
-                # 정면 장애물 감지
-                # ------------------------------------------------
-
-                if (
-                    front_d > 0
-                    and front_d <= FRONT_OBSTACLE_THRESH
-                ):
-
-                    print()
-                    print(
-                        f"[장애물 감지] "
-                        f"Front = {front_d:.1f} cm"
-                    )
-
-                    print(
-                        "[동작] 정지 후 좌/우 공간 확인"
-                    )
-
-
-                    current_state = (
-                        STATE_CHECK_OBSTACLE
-                    )
-
-                    state_timer = time.time()
-
-                    clear_confirm_counter = 0
-
-
-                    # 즉시 정지
-
-                    with error_lock:
-
-                        shared_speed = 0.0
-
-                        shared_angular_override = 0.0
-
-
-                else:
-
-                    # ------------------------------------------------
-                    # 정상 차선 주행
-                    # ------------------------------------------------
-
-                    with error_lock:
-
-                        shared_error = error
-
-
-                        if is_detected:
-
-                            shared_speed = BASE_SPEED
-
-                        else:
-
-                            # 차선이 안 보이면 정지
-                            shared_speed = 0.0
-
-
-                        # PID 사용
-
-                        shared_angular_override = None
-
-
-            # =================================================
-            # STATE 2
-            # 장애물 좌/우 공간 확인
-            # =================================================
-
-            elif current_state == STATE_CHECK_OBSTACLE:
-
-                elapsed = (
-                    time.time()
-                    - state_timer
-                )
-
-
-                if elapsed >= OBSTACLE_CHECK_DELAY:
-
-                    print()
-                    print(
-                        "[공간 분석]"
-                    )
-
-                    print(
-                        f"LEFT  = {left_d:.1f} cm"
-                    )
-
-                    print(
-                        f"FRONT = {front_d:.1f} cm"
-                    )
-
-                    print(
-                        f"RIGHT = {right_d:.1f} cm"
-                    )
-
-
-                    # ------------------------------------------------
-                    # 좌측 회피 가능 여부
-                    # ------------------------------------------------
-
-                    left_available = (
-                        left_d < 0
-                        or left_d >= SIDE_SAFE_THRESH
-                    )
-
-
-                    # ------------------------------------------------
-                    # 우측 회피 가능 여부
-                    # ------------------------------------------------
-
-                    right_available = (
-                        right_d < 0
-                        or right_d >= SIDE_SAFE_THRESH
-                    )
-
-
-                    print(
-                        f"[판단] "
-                        f"LEFT="
-                        f"{'가능' if left_available else '불가'}"
-                        f" / "
-                        f"RIGHT="
-                        f"{'가능' if right_available else '불가'}"
-                    )
-
-
-                    # ------------------------------------------------
-                    # 둘 다 불가능
-                    # ------------------------------------------------
-
-                    if (
-                        not left_available
-                        and not right_available
-                    ):
-
-                        print(
-                            "[정지] 양쪽 모두 회피 공간 부족"
-                        )
-
-
-                        current_state = (
-                            STATE_BLOCKED_STOP
-                        )
-
-
-                        with error_lock:
-
-                            shared_speed = 0.0
-
-                            shared_angular_override = 0.0
-
-
-                    # ------------------------------------------------
-                    # 좌측만 가능
-                    # ------------------------------------------------
-
-                    elif (
-                        left_available
-                        and not right_available
-                    ):
-
-                        avoid_direction = "LEFT"
-
-
-                        print(
-                            "[회피 결정] LEFT"
-                        )
-
-
-                        current_state = (
-                            STATE_AVOID_TURN
-                        )
-
-                        state_timer = time.time()
-
-
-                    # ------------------------------------------------
-                    # 우측만 가능
-                    # ------------------------------------------------
-
-                    elif (
-                        right_available
-                        and not left_available
-                    ):
-
-                        avoid_direction = "RIGHT"
-
-
-                        print(
-                            "[회피 결정] RIGHT"
-                        )
-
-
-                        current_state = (
-                            STATE_AVOID_TURN
-                        )
-
-                        state_timer = time.time()
-
-
-                    # ------------------------------------------------
-                    # 양쪽 모두 가능
-                    # ------------------------------------------------
-
-                    else:
-
-                        # 둘 다 가능하면
-                        # 더 넓은 방향 선택
-
-                        if (
-                            left_d < 0
-                            and right_d >= 0
-                        ):
-
-                            avoid_direction = "LEFT"
-
-                        elif (
-                            right_d < 0
-                            and left_d >= 0
-                        ):
-
-                            avoid_direction = "RIGHT"
-
-                        elif left_d >= right_d:
-
-                            avoid_direction = "LEFT"
-
-                        else:
-
-                            avoid_direction = "RIGHT"
-
-
-                        print(
-                            f"[회피 결정] "
-                            f"{avoid_direction}"
-                        )
-
-
-                        current_state = (
-                            STATE_AVOID_TURN
-                        )
-
-                        state_timer = time.time()
-
-
-            # =================================================
-            # STATE 3
-            # 회피 방향으로 회전
-            # =================================================
-
-            elif current_state == STATE_AVOID_TURN:
-
-                elapsed = (
-                    time.time()
-                    - state_timer
-                )
-
-
-                # ------------------------------------------------
-                # 정면이 너무 가까워지면 즉시 정지
-                # ------------------------------------------------
-
-                if (
-                    front_d > 0
-                    and front_d <= EMERGENCY_FRONT_THRESH
-                ):
-
-                    print(
-                        f"[긴급 정지] "
-                        f"회전 중 Front = "
-                        f"{front_d:.1f} cm"
-                    )
-
-
-                    current_state = (
-                        STATE_BLOCKED_STOP
-                    )
-
-
-                    with error_lock:
-
-                        shared_speed = 0.0
-
-                        shared_angular_override = 0.0
-
-
-                # =================================================
-                # LEFT 회피
-                # =================================================
-
-                elif avoid_direction == "LEFT":
-
-                    # 좌측이 너무 가까워짐
-
-                    if (
-                        left_d > 0
-                        and left_d <= SIDE_DANGER_THRESH
-                    ):
-
-                        print(
-                            f"[긴급 정지] "
-                            f"회전 중 Left = "
-                            f"{left_d:.1f} cm"
-                        )
-
-
-                        current_state = (
-                            STATE_BLOCKED_STOP
-                        )
-
-
-                        with error_lock:
-
-                            shared_speed = 0.0
-
-                            shared_angular_override = 0.0
-
-
-                    elif elapsed < AVOID_TURN_TIME:
-
-                        with error_lock:
-
-                            shared_speed = 0.0
-
-                            shared_angular_override = (
-                                TURN_ANGULAR_SPEED
-                            )
-
-
-                    else:
-
-                        print(
-                            "[회전 완료] "
-                            "LEFT 방향 통과 시작"
-                        )
-
-
-                        current_state = (
-                            STATE_AVOID_FORWARD
-                        )
-
-                        avoid_forward_start_time = (
-                            time.time()
-                        )
-
-                        clear_confirm_counter = 0
-
-
-                # =================================================
-                # RIGHT 회피
-                # =================================================
-
-                else:
-
-                    # 우측이 너무 가까워짐
-
-                    if (
-                        right_d > 0
-                        and right_d <= SIDE_DANGER_THRESH
-                    ):
-
-                        print(
-                            f"[긴급 정지] "
-                            f"회전 중 Right = "
-                            f"{right_d:.1f} cm"
-                        )
-
-
-                        current_state = (
-                            STATE_BLOCKED_STOP
-                        )
-
-
-                        with error_lock:
-
-                            shared_speed = 0.0
-
-                            shared_angular_override = 0.0
-
-
-                    elif elapsed < AVOID_TURN_TIME:
-
-                        with error_lock:
-
-                            shared_speed = 0.0
-
-                            shared_angular_override = (
-                                -TURN_ANGULAR_SPEED
-                            )
-
-
-                    else:
-
-                        print(
-                            "[회전 완료] "
-                            "RIGHT 방향 통과 시작"
-                        )
-
-
-                        current_state = (
-                            STATE_AVOID_FORWARD
-                        )
-
-                        avoid_forward_start_time = (
-                            time.time()
-                        )
-
-                        clear_confirm_counter = 0
-
-
-            # =================================================
-            # STATE 4
-            # 장애물 옆으로 서행
-            # =================================================
-
-            elif current_state == STATE_AVOID_FORWARD:
-
-                elapsed = (
-                    time.time()
-                    - avoid_forward_start_time
-                )
-
-
-                # ------------------------------------------------
-                # 현재 센서 위험 여부
-                # ------------------------------------------------
-
-                front_danger = (
-                    front_d > 0
-                    and front_d <= EMERGENCY_FRONT_THRESH
-                )
-
-
-                left_danger = (
-                    left_d > 0
-                    and left_d <= SIDE_DANGER_THRESH
-                )
-
-
-                right_danger = (
-                    right_d > 0
-                    and right_d <= SIDE_DANGER_THRESH
-                )
-
-
-                # ------------------------------------------------
-                # 정면 위험
-                # ------------------------------------------------
-
-                if front_danger:
-
-                    print(
-                        f"[긴급 정지] "
-                        f"회피 중 Front = "
-                        f"{front_d:.1f} cm"
-                    )
-
-
-                    current_state = (
-                        STATE_BLOCKED_STOP
-                    )
-
-
-                    with error_lock:
-
-                        shared_speed = 0.0
-
-                        shared_angular_override = 0.0
-
-
-                # ------------------------------------------------
-                # LEFT 회피 중 왼쪽 위험
-                # ------------------------------------------------
-
-                elif (
-                    avoid_direction == "LEFT"
-                    and left_danger
-                ):
-
-                    print(
-                        f"[긴급 정지] "
-                        f"회피 중 Left = "
-                        f"{left_d:.1f} cm"
-                    )
-
-
-                    current_state = (
-                        STATE_BLOCKED_STOP
-                    )
-
-
-                    with error_lock:
-
-                        shared_speed = 0.0
-
-                        shared_angular_override = 0.0
-
-
-                # ------------------------------------------------
-                # RIGHT 회피 중 오른쪽 위험
-                # ------------------------------------------------
-
-                elif (
-                    avoid_direction == "RIGHT"
-                    and right_danger
-                ):
-
-                    print(
-                        f"[긴급 정지] "
-                        f"회피 중 Right = "
-                        f"{right_d:.1f} cm"
-                    )
-
-
-                    current_state = (
-                        STATE_BLOCKED_STOP
-                    )
-
-
-                    with error_lock:
-
-                        shared_speed = 0.0
-
-                        shared_angular_override = 0.0
-
-
-                # ------------------------------------------------
-                # 정면 장애물이 충분히 멀어짐
-                # ------------------------------------------------
-
-                elif (
-                    front_d < 0
-                    or front_d >= OBSTACLE_CLEAR_THRESH
-                ):
-
-                    clear_confirm_counter += 1
-
-
-                    print(
-                        f"[통과 확인] "
-                        f"{clear_confirm_counter}/"
-                        f"{CLEAR_CONFIRM_COUNT}"
-                    )
-
-
-                    if (
-                        clear_confirm_counter
-                        >= CLEAR_CONFIRM_COUNT
-                    ):
-
-                        print(
-                            "[장애물 통과 확인]"
-                        )
-
-
-                        current_state = (
-                            STATE_RECOVERY_TURN
-                        )
-
-                        state_timer = time.time()
-
-                        clear_confirm_counter = 0
-
-
-                # ------------------------------------------------
-                # 아직 장애물이 존재
-                # ------------------------------------------------
-
-                else:
-
-                    clear_confirm_counter = 0
-
-
-                    # --------------------------------------------
-                    # 최대 회피 시간 초과
-                    # --------------------------------------------
-
-                    if (
-                        elapsed
-                        >= MAX_AVOID_FORWARD_TIME
-                    ):
-
-                        print(
-                            "[경고] "
-                            "최대 회피 시간 초과 -> 정지"
-                        )
-
-
-                        current_state = (
-                            STATE_BLOCKED_STOP
-                        )
-
-
-                        with error_lock:
-
-                            shared_speed = 0.0
-
-                            shared_angular_override = 0.0
-
-
-                    else:
-
-                        # ----------------------------------------
-                        # 정상 회피 전진
-                        # ----------------------------------------
-
-                        with error_lock:
-
-                            shared_speed = AVOID_SPEED
-
-                            shared_angular_override = 0.0
-
-
-            # =================================================
-            # STATE 5
-            # 차선 방향으로 복귀
-            # =================================================
-
-            elif current_state == STATE_RECOVERY_TURN:
-
-                elapsed = (
-                    time.time()
-                    - state_timer
-                )
-
-
-                # ------------------------------------------------
-                # 복귀 중 정면 장애물 재감지
-                # ------------------------------------------------
-
-                if (
-                    front_d > 0
-                    and front_d <= EMERGENCY_FRONT_THRESH
-                ):
-
-                    print(
-                        f"[복귀 중 장애물 재감지] "
-                        f"Front = {front_d:.1f} cm"
-                    )
-
-
-                    current_state = (
-                        STATE_BLOCKED_STOP
-                    )
-
-
-                    with error_lock:
-
-                        shared_speed = 0.0
-
-                        shared_angular_override = 0.0
-
-
-                # =================================================
-                # LEFT에서 회피했을 경우
-                # =================================================
-
-                elif avoid_direction == "LEFT":
-
-                    if elapsed < RECOVERY_TURN_TIME:
-
-                        with error_lock:
-
-                            shared_speed = 0.0
-
-                            shared_angular_override = (
-                                -TURN_ANGULAR_SPEED
-                            )
-
-                    else:
-
-                        print(
-                            "[복귀 완료] "
-                            "PID 차선 추종 재개"
-                        )
-
-
-                        current_state = (
-                            STATE_LANE_FOLLOWING
-                        )
-
-                        avoid_direction = None
-
-
-                        with error_lock:
-
-                            shared_angular_override = None
-
-
-                # =================================================
-                # RIGHT에서 회피했을 경우
-                # =================================================
-
-                else:
-
-                    if elapsed < RECOVERY_TURN_TIME:
-
-                        with error_lock:
-
-                            shared_speed = 0.0
-
-                            shared_angular_override = (
-                                TURN_ANGULAR_SPEED
-                            )
-
-                    else:
-
-                        print(
-                            "[복귀 완료] "
-                            "PID 차선 추종 재개"
-                        )
-
-
-                        current_state = (
-                            STATE_LANE_FOLLOWING
-                        )
-
-                        avoid_direction = None
-
-
-                        with error_lock:
-
-                            shared_angular_override = None
-
-
-            # =================================================
-            # STATE 6
-            # 회피 불가능 -> 정지
-            # =================================================
-
-            elif current_state == STATE_BLOCKED_STOP:
-
-                # 무조건 정지
-
-                with error_lock:
-
-                    shared_speed = 0.0
-
-                    shared_angular_override = 0.0
-
-
-                # 센서가 정상적으로 연결된 경우
-                # 장애물 제거 여부 확인
-
-                if sensors_ready:
-
-                    obstacle_cleared = (
-                        front_d < 0
-                        or front_d > OBSTACLE_CLEAR_THRESH
-                    )
-
-
-                    if obstacle_cleared:
-
-                        print(
-                            "[장애물 제거 확인] "
-                            "정상 주행 재개"
-                        )
-
-
-                        current_state = (
-                            STATE_LANE_FOLLOWING
-                        )
-
-                        avoid_direction = None
-
-
-                        with error_lock:
-
-                            shared_angular_override = None
-
-
-            # =================================================
-            # E. 화면 표시
-            # =================================================
-
-            display = frame.copy()
-
-
-            # ------------------------------------------------
-            # 현재 상태
-            # ------------------------------------------------
-
+            left_space, right_space = last_lane_space
             cv2.putText(
-                display,
-                f"STATE: {current_state}",
-                (10, 25),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (0, 255, 0),
-                2
+                annotated, f"STATE: {state.name}", (10, 25),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2
             )
-
-
-            # ------------------------------------------------
-            # 초음파 값
-            # ------------------------------------------------
-
             cv2.putText(
-                display,
-                (
-                    f"L:{left_d:.1f} "
-                    f"F:{front_d:.1f} "
-                    f"R:{right_d:.1f}"
-                ),
-                (10, 50),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                (0, 255, 255),
-                2
+                annotated,
+                f"US L/F/R: {left_d:.1f}/{front_d:.1f}/{right_d:.1f} cm",
+                (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 0), 1
             )
-
-
-            # ------------------------------------------------
-            # 차선 인식
-            # ------------------------------------------------
-
+            if left_space is None or right_space is None:
+                space_text = "Free L/R: unavailable"
+            else:
+                space_text = f"Free L/R: {left_space:.1f}/{right_space:.1f} cm"
             cv2.putText(
-                display,
-                f"LANE: {'OK' if is_detected else 'LOST'}",
-                (10, 75),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                (255, 255, 255),
-                2
+                annotated, space_text, (10, 75),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 0), 1
             )
 
-
-            # ------------------------------------------------
-            # 회피 방향
-            # ------------------------------------------------
-
-            if avoid_direction is not None:
-
-                cv2.putText(
-                    display,
-                    f"AVOID: {avoid_direction}",
-                    (10, 100),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 255, 255),
-                    2
-                )
-
-
-            # ------------------------------------------------
-            # 화면 출력
-            # ------------------------------------------------
-
-            cv2.imshow(
-                "UGV02 Autonomous Driving",
-                display
-            )
-
-
-            # ESC 종료
-
-            key = cv2.waitKey(1) & 0xFF
-
-
-            if key == 27:
-
-                print(
-                    "[알림] ESC 입력 -> 종료"
-                )
-
+            cv2.imshow("UGV02 main_test", annotated)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
 
-
-            time.sleep(0.01)
-
-
-    # ========================================================
-    # Ctrl + C
-    # ========================================================
+            time.sleep(CAMERA_PERIOD_S)
 
     except KeyboardInterrupt:
-
-        print(
-            "\n[알림] Ctrl+C 감지"
-        )
-
-
-    # ========================================================
-    # 종료 처리
-    # ========================================================
-
+        print("\n[STOP] Keyboard interrupt")
+    except Exception:
+        traceback.print_exc()
     finally:
+        shutdown_event.set()
+        force_stop()
 
-        print(
-            "[알림] 시스템 종료 중..."
-        )
+        if control_thread is not None:
+            control_thread.join(timeout=1.0)
 
+        if ugv_serial is not None:
+            try:
+                ugv_control.stop_ugv(ugv_serial)
+            except Exception as exc:
+                print(f"[STOP WARNING] {exc!r}")
 
-        # ---------------------------------------------
-        # 모터 정지
-        # ---------------------------------------------
+        if ultrasonic is not None:
+            try:
+                ultrasonic.stop()
+            except Exception:
+                pass
 
-        with error_lock:
-
-            shared_speed = 0.0
-
-            shared_angular_override = 0.0
-
-
-        if ugv_serial:
-
-            ugv_control.stop_ugv(
-                ugv_serial
-            )
-
-
-        # ---------------------------------------------
-        # 제어 스레드 종료
-        # ---------------------------------------------
-
-        is_running = False
-
-
-        if (
-            "control_thread" in locals()
-            and control_thread.is_alive()
-        ):
-
-            control_thread.join(
-                timeout=1.0
-            )
-
-
-        # ---------------------------------------------
-        # 초음파 종료
-        # ---------------------------------------------
-
-        if ultrasonic:
-
-            ultrasonic.stop()
-
-
-        # ---------------------------------------------
-        # 카메라 종료
-        # ---------------------------------------------
-
-        cap.release()
-
+        if camera is not None:
+            camera.release()
         cv2.destroyAllWindows()
+        print("[EXIT] Shutdown complete")
 
 
-        print(
-            "[알림] 프로그램 종료 완료"
-        )
+if __name__ == "__main__":
+    main()
