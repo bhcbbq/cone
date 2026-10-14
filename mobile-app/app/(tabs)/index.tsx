@@ -431,7 +431,8 @@ export default function HomeScreen() {
 
 
 
-
+  const returnPausedRef =
+    useRef(false);
 
 
   // STOP 후 재출발할 때 이전까지 이동한 거리를 보존하기 위한 offset

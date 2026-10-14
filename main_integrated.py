@@ -14,17 +14,15 @@ import ugv_control
 
 BASE_SPEED = 0.30
 
-# 복귀 U턴 속도
-# 양쪽 바퀴 모두 전진시키고 속도 차이로 크게 회전
-RETURN_INNER_SPEED = 0.28
-RETURN_OUTER_SPEED = 0.30
+# 복귀 제자리 180도 회전 속도
+TURN_SPEED = 0.25
 
 # 영상 정렬 시 천천히 회전
 ALIGN_TURN_SPEED = 0.18
 
-# 크게 U턴할 때의 엔코더 기준 거리
-# 실제 회전각을 보면서 조정
-COARSE_TURN_DISTANCE_M = 2.0
+# 제자리 회전 엔코더 기준 거리
+# 실제 180도 회전각을 보면서 조정
+COARSE_TURN_DISTANCE_M = 0.44
 
 # 차선 중심 오차 허용 범위
 # 실제 테스트하면서 조정
@@ -758,9 +756,12 @@ def control_thread_task():
 
         elif current_mode == "RETURN_TURN":
 
-            # 제자리 회전이 아니라 앞으로 진행하면서 크게 U턴
+            # 좌우 바퀴를 반대 방향으로 돌려 제자리에서 180도 회전
             send_raw_ugv(
-                '{"T":1,' f'"L":{RETURN_INNER_SPEED},' f'"R":{RETURN_OUTER_SPEED}' "}"
+                '{"T":1,'
+                f'"L":{-TURN_SPEED},'
+                f'"R":{TURN_SPEED}'
+                '}'
             )
 
         # ============================================================
