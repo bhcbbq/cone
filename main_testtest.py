@@ -42,7 +42,7 @@ LANE_WIDTH_CM = 70.0
 VEHICLE_WIDTH_CM = 21.0
 MIN_LANE_CLEARANCE_CM = 25.0  # 차체 21cm + 여유 4cm
 
-FRONT_STOP_CM = 45.0
+FRONT_STOP_CM = 35.0
 OBSTACLE_CLEAR_CM = 50.0
 OBSTACLE_CLEAR_HOLD_S = 0.5
 
@@ -53,7 +53,7 @@ PASS_SPEED = 0.12         # m/s (장애물 옆 직진 통과 속도)
 TURN_OUT_TIME_S = 0.25    # S자 회피 1단계 시간 (대각선 틀기)
 ALIGN_TIME_S = 0.25       # S자 회피 2단계 시간 (차선과 평행 정렬)
 TURN_ANGULAR_SPEED = 1.0  # rad/s (마찰 극복 각속도)
-PASS_DISTANCE_CM = 45.0   # 장애물 측면 오도메트리/타이머 통과 거리
+PASS_DISTANCE_CM = 70.0   # 장애물 측면 오도메트리/타이머 통과 거리
 PASS_TIMEOUT_S = PASS_DISTANCE_CM / (PASS_SPEED * 100.0)
 RECOVERY_TIMEOUT_S = 5.0
 
