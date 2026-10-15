@@ -83,7 +83,7 @@ def calculate_pid(current_error, previous_error, dt, Kp=0.005, Kd=0.002):
     # error > 0 은 "좌회전이 필요한 상태"이므로 그대로 양수로 내보내야 함.
     # 기존 코드는 앞에 '-' 부호가 붙어 있어 차선 이탈 시 반대 방향으로 꺾이는 문제가 있었음.
     # ⚠️ 실제 로봇에서 반드시 바퀴를 들고 벤치 테스트로 좌/우 방향을 재확인할 것!
-    angular_z = -(Kp * current_error + Kd * derivative)
+    angular_z = Kp * current_error + Kd * derivative
 
     # 급회전 및 기체 전복을 막기 위한 조향 각속도 상한선(Clamp)
     MAX_ANGULAR_Z = 1.5
