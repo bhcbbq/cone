@@ -1,5 +1,5 @@
-# main_test.py
-# UGV02 lane following + in-lane obstacle avoidance (Yellow Obstacle Version)
+# main_test_2.py
+# UGV02 lane following + in-lane obstacle avoidance (Multi-Color Inverse Masking Version)
 #
 # Interfaces verified against the supplied files:
 #   lane_detection.py:
@@ -223,7 +223,7 @@ def estimate_lane_boundaries(lines, image_width, image_height):
 
 def estimate_lane_space(frame, lines):
     """
-    Estimate free space left/right of the largest YELLOW obstacle.
+    Estimate free space left/right of any obstacle (excluding black floor and white lane).
     """
     height, width = frame.shape[:2]
     x_left, x_right = estimate_lane_boundaries(lines, width, height)
@@ -238,7 +238,7 @@ def estimate_lane_space(frame, lines):
     # 세로 영역 Crop (도로 하단부)
     y1, y2 = int(height * 0.52), int(height * 0.84)
     
-    # [수정] 차선 흰색 선분이 감지 구역에 들어오지 않도록 8% 안쪽 마진(Margin) 적용
+    # 차선 흰색 선분이 감지 구역에 들어오지 않도록 8% 안쪽 마진(Margin) 적용
     margin_px = int(lane_px * 0.08)
     x1 = max(0, int(x_left + margin_px))
     x2 = min(width, int(x_right - margin_px))
@@ -250,16 +250,27 @@ def estimate_lane_space(frame, lines):
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
 
     # =========================================================
-    # [수정] 노란색 장애물 전용 HSV 마스크
-    # H(Hue): 15 ~ 35 (선명한 노란색 범위)
-    # S(Saturation): 100 ~ 255 (채도 높음)
-    # V(Value): 100 ~ 255 (밝음)
+    # [수정] 검은색 바닥과 흰색 차선을 제외한 모든 색상 감지 (반전 마스크)
     # =========================================================
-    mask = cv2.inRange(
+    # 1. 검은색 바닥 영역 (V <= 60)
+    mask_black = cv2.inRange(
         hsv, 
-        np.array([15, 100, 100], np.uint8),
-        np.array([35, 255, 255], np.uint8)
+        np.array([0, 0, 0], np.uint8),
+        np.array([179, 255, 60], np.uint8)
     )
+
+    # 2. 흰색 차선 영역 (S <= 50, V >= 170)
+    mask_white = cv2.inRange(
+        hsv, 
+        np.array([0, 0, 170], np.uint8),
+        np.array([179, 50, 255], np.uint8)
+    )
+
+    # 3. 검은색 바닥 + 흰색 차선 영역 결합
+    floor_and_lane = cv2.bitwise_or(mask_black, mask_white)
+
+    # 4. 바닥과 차선이 아닌 '나머지 모든 색상'을 장애물로 간주 (반전 처리)
+    mask = cv2.bitwise_not(floor_and_lane)
 
     # 노이즈 제거 (Opening / Closing)
     kernel = np.ones((5, 5), np.uint8)
@@ -269,7 +280,7 @@ def estimate_lane_space(frame, lines):
     contours, _ = cv2.findContours(
         mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
     )
-    min_area = max(30, int((x2 - x1) * (y2 - y1) * 0.001))
+    min_area = max(30, int((x2 - x1) * (y2 - y1) * 0.005))
     contours = [c for c in contours if cv2.contourArea(c) >= min_area]
 
     if contours:
@@ -278,7 +289,7 @@ def estimate_lane_space(frame, lines):
         obs_left = x1 + bx
         obs_right = x1 + bx + bw
     else:
-        # 노란색 윤곽선 미검출 시 (장애물이 없거나 파악 불가)
+        # 장애물 윤곽선 미검출 시 (장애물이 없거나 파악 불가)
         assumed_width_px = 15.0 / cm_per_px
         obs_center = (x_left + x_right) / 2.0
         obs_left = obs_center - assumed_width_px / 2.0
