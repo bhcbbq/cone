@@ -247,8 +247,8 @@ if __name__ == "__main__":
             # 기존 main.py의 인식 범위 유지
             roi_vertices = [
                 (0, height),
-                (int(width * 0.05), int(height * 0.5)),
-                (int(width * 0.95), int(height * 0.5)),
+                (int(width * 0.2), int(height * 0.5)),
+                (int(width * 0.8), int(height * 0.5)),
                 (width, height)
             ]
 
