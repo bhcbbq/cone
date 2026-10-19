@@ -247,8 +247,8 @@ if __name__ == "__main__":
             # 기존 main.py의 인식 범위 유지
             roi_vertices = [
                 (0, height),
-                (int(width * 0.05), int(height * 0.25)),
-                (int(width * 0.95), int(height * 0.25)),
+                (int(width * 0.1), int(height * 0.5)),
+                (int(width * 0.9), int(height * 0.5)),
                 (width, height)
             ]
 
@@ -273,6 +273,9 @@ if __name__ == "__main__":
 
             # 기존 main.py의 화면 표시 유지
             cv2.imshow(window_name, result_image)
+
+            # 추가: ROI 적용 전 전체 Canny 에지 화면 표시
+            cv2.imshow("Canny Edges", edges)
 
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 print("[알림] 사용자가 'q'를 눌러 프로그램을 종료했습니다.")

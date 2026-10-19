@@ -1,0 +1,30 @@
+# light_control.py
+import threading
+
+
+class LightControl:
+    """아두이노 릴레이로 조명 ON/OFF만 담당.
+    시리얼 포트를 직접 열지 않고, 이미 열린 serial.Serial 객체를 받아서 쓴다."""
+
+    def __init__(self, ser):
+        self.ser = ser
+        self._lock = threading.Lock()
+        self.is_on = False
+
+    def on(self):
+        with self._lock:
+            self.ser.write(b"1")
+            self.ser.flush()
+            self.is_on = True
+
+    def off(self):
+        with self._lock:
+            self.ser.write(b"0")
+            self.ser.flush()
+            self.is_on = False
+
+    def toggle(self):
+        if self.is_on:
+            self.off()
+        else:
+            self.on()
