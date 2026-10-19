@@ -243,12 +243,12 @@ export function RobotControlScreen({
                       : styles.connectButton,
 
                     isConnecting &&
-                    styles.connectionButtonDisabled,
+                      styles.connectionButtonDisabled,
 
                     pressed &&
-                    !isConnecting && {
-                      opacity: 0.8,
-                    },
+                      !isConnecting && {
+                        opacity: 0.8,
+                      },
                   ]}
                 >
                   {isConnecting ? (
@@ -750,12 +750,12 @@ export function RobotControlScreen({
                   style={({ pressed }) => [
                     styles.directionButton,
                     pressed &&
-                    styles.manualPressed,
+                      styles.manualPressed,
                   ]}
                 >
                   <Ionicons
-                    name="arrow-up"
-                    size={30}
+                    name="caret-up"
+                    size={34}
                     color={colors.textPrimary}
                   />
                 </Pressable>
@@ -765,12 +765,12 @@ export function RobotControlScreen({
                     style={({ pressed }) => [
                       styles.directionButton,
                       pressed &&
-                      styles.manualPressed,
+                        styles.manualPressed,
                     ]}
                   >
                     <Ionicons
-                      name="arrow-back"
-                      size={30}
+                      name="caret-back"
+                      size={34}
                       color={colors.textPrimary}
                     />
                   </Pressable>
@@ -779,7 +779,7 @@ export function RobotControlScreen({
                     style={({ pressed }) => [
                       styles.manualStopButton,
                       pressed &&
-                      styles.manualPressed,
+                        styles.manualPressed,
                     ]}
                   >
                     <Ionicons
@@ -793,12 +793,12 @@ export function RobotControlScreen({
                     style={({ pressed }) => [
                       styles.directionButton,
                       pressed &&
-                      styles.manualPressed,
+                        styles.manualPressed,
                     ]}
                   >
                     <Ionicons
-                      name="arrow-forward"
-                      size={30}
+                      name="caret-forward"
+                      size={34}
                       color={colors.textPrimary}
                     />
                   </Pressable>
@@ -808,12 +808,12 @@ export function RobotControlScreen({
                   style={({ pressed }) => [
                     styles.directionButton,
                     pressed &&
-                    styles.manualPressed,
+                      styles.manualPressed,
                   ]}
                 >
                   <Ionicons
-                    name="arrow-down"
-                    size={30}
+                    name="caret-down"
+                    size={34}
                     color={colors.textPrimary}
                   />
                 </Pressable>
@@ -1066,27 +1066,29 @@ const styles = StyleSheet.create({
 
   // =========================
   // SPEED CARD
+  // 목표 거리 카드와 같은 흰색 + 둥근 사각형 스타일
   // =========================
 
   speedCard: {
-    backgroundColor:
-      colors.background,
+    backgroundColor: colors.white,
     borderWidth: 1,
-    borderColor:
-      colors.border,
-    borderRadius:
-      radius.pill,
-    paddingHorizontal:
-      spacing.md,
-    paddingVertical:
-      spacing.md,
+    borderColor: colors.border,
+    borderRadius: 24,
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.md,
+    paddingBottom: spacing.md,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.08,
+    shadowRadius: 6,
+    elevation: 3,
   },
 
   speedHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: spacing.sm,
+    marginBottom: 4,
   },
 
   speedTitleRow: {
@@ -1099,11 +1101,10 @@ const styles = StyleSheet.create({
   speedIconBox: {
     width: 36,
     height: 36,
-    borderRadius: 18,
+    borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor:
-      colors.statusArrivedSoft,
+    backgroundColor: colors.statusArrivedSoft,
     marginRight: spacing.sm,
   },
 
@@ -1121,13 +1122,13 @@ const styles = StyleSheet.create({
   },
 
   speedValueBadge: {
-    minWidth: 54,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-    borderRadius: radius.pill,
-    backgroundColor:
-      colors.statusArrivedSoft,
+    minWidth: 60,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 16,
+    backgroundColor: colors.statusArrivedSoft,
     alignItems: 'center',
+    justifyContent: 'center',
   },
 
   speedValue: {
@@ -1138,19 +1139,24 @@ const styles = StyleSheet.create({
 
   slider: {
     width: '100%',
-    height: 42,
+    height: 38,
+    marginTop: 4,
   },
 
   speedRangeRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    paddingHorizontal: 4,
+    alignItems: 'center',
+    paddingHorizontal: 6,
+    marginTop: -1,
   },
 
   speedRangeText: {
     ...typography.caption,
     color: colors.textMuted,
     fontSize: 11,
+    lineHeight: 16,
+    includeFontPadding: false,
   },
 
   // =========================
@@ -1178,6 +1184,7 @@ const styles = StyleSheet.create({
 
   // =========================
   // MANUAL PAGE
+  // 목표 거리 카드와 동일한 흰색 카드 + 둥근 사각형 스타일
   // =========================
 
   manualContainer: {
@@ -1205,10 +1212,16 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     borderWidth: 1,
     borderColor: colors.border,
-    borderRadius: radius.pill,
-    padding: spacing.md,
+    borderRadius: 24,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.lg,
     marginBottom: spacing.md,
-    backgroundColor: colors.background,
+    backgroundColor: colors.white,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.08,
+    shadowRadius: 6,
+    elevation: 3,
   },
 
   manualCardLabel: {
@@ -1235,10 +1248,16 @@ const styles = StyleSheet.create({
   manualCard: {
     borderWidth: 1,
     borderColor: colors.border,
-    borderRadius: radius.pill,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.lg,
-    backgroundColor: colors.background,
+    borderRadius: 24,
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.lg,
+    paddingBottom: spacing.xl,
+    backgroundColor: colors.white,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.08,
+    shadowRadius: 6,
+    elevation: 3,
   },
 
   manualCardTitle: {
@@ -1255,29 +1274,29 @@ const styles = StyleSheet.create({
   directionMiddleRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginVertical: 10,
+    marginVertical: 12,
   },
 
   directionButton: {
-    width: 72,
-    height: 72,
-    borderRadius: 22,
+    width: 76,
+    height: 76,
+    borderRadius: 18,
     backgroundColor: colors.surfaceMuted,
     borderWidth: 1,
     borderColor: colors.border,
     alignItems: 'center',
     justifyContent: 'center',
-    marginHorizontal: 6,
+    marginHorizontal: 7,
   },
 
   manualStopButton: {
-    width: 72,
-    height: 72,
-    borderRadius: 22,
+    width: 76,
+    height: 76,
+    borderRadius: 18,
     backgroundColor: colors.danger,
     alignItems: 'center',
     justifyContent: 'center',
-    marginHorizontal: 6,
+    marginHorizontal: 7,
   },
 
   manualPressed: {
@@ -1289,9 +1308,12 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'flex-start',
     marginTop: spacing.md,
-    padding: spacing.md,
-    borderRadius: radius.pill,
-    backgroundColor: colors.surfaceMuted,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md,
+    borderRadius: 20,
+    backgroundColor: colors.white,
+    borderWidth: 1,
+    borderColor: colors.border,
   },
 
   manualNoticeText: {
