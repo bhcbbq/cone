@@ -1,5 +1,5 @@
-# main_test_multi_color_vision.py
-# UGV02 Lane Following + Multi-Color Obstacle Avoidance (Inverse Masking)
+# main_highway_contour_avoid.py
+# UGV02 Lane Following + Edge/Contour Obstacle Avoidance (Color-Independent Highway Version)
 
 import cv2
 import time
@@ -15,7 +15,7 @@ from ultrasonic_reader import UltrasonicReader
 
 
 # ============================================================
-# Configuration
+# Configuration (고속도로 넓은 차선 맞춤 설정)
 # ============================================================
 
 UGV_PORT = "/dev/ttyACM0"
@@ -28,21 +28,24 @@ CAMERA_FPS = 30
 
 LANE_WIDTH_CM = 70.0
 
-FRONT_STOP_CM = 35.0          # 장애물 회피 시작 감지 거리 (35cm)
-OBSTACLE_CLEAR_CM = 40.0      # 비상 정지 해제 판단 거리
+# 감지 거리 확장: 55cm (크게 꺾으므로 멀리서 미리 회피 시작)
+FRONT_STOP_CM = 55.0          
+OBSTACLE_CLEAR_CM = 60.0      # 비상 정지 해제 판단 거리
 OBSTACLE_CLEAR_HOLD_S = 0.5
 
 NORMAL_SPEED = 0.15           # m/s (일반 차선 추종)
-AVOID_SPEED = 0.08            # m/s (S자 회피 및 복귀 시 속도)
+AVOID_SPEED = 0.10            # m/s (S자 회피 속도)
 PASS_SPEED = 0.12             # m/s (장애물 측면 직진 통과 속도)
 
-TURN_OUT_TIME_S = 0.25        # 1단계: 대각선 틀기 시간
-ALIGN_TIME_S = 0.25           # 2단계: 차선 평행 정렬 시간
-TURN_ANGULAR_SPEED = 1.0      # rad/s (회전 각속도)
+# 대각선 이동 및 정렬 시간 확장 (측면 이동 거리 약 30cm 이상 확보)
+TURN_OUT_TIME_S = 0.45        # 1단계: 대각선 틀기 시간
+ALIGN_TIME_S = 0.45           # 2단계: 차선 평행 정렬 시간
+TURN_ANGULAR_SPEED = 1.1      # rad/s (과적 마찰 극복 각속도)
 
-PASS_DISTANCE_CM = 75.0       # 장애물 통과 직진 거리
+# 통과 거리 확장 (90cm)
+PASS_DISTANCE_CM = 90.0       
 PASS_TIMEOUT_S = PASS_DISTANCE_CM / (PASS_SPEED * 100.0)
-RECOVERY_TIMEOUT_S = 5.0
+RECOVERY_TIMEOUT_S = 6.0      # 복귀 타임아웃 확장
 
 CONTROL_PERIOD_S = 0.02
 CAMERA_PERIOD_S = 0.03
@@ -123,10 +126,14 @@ def open_camera():
 
 
 # ============================================================
-# Vision Logic (Multi-Color Inverse Masking)
+# Vision Logic (Canny Edge + Contour Based)
 # ============================================================
 
 def detect_hough_lines(frame):
+    """
+    [Canny Edge 기반 차선 추종]
+    도로/차선 색상에 의존하지 않고 명암 차이(Edge)로 차선 선분을 추출합니다.
+    """
     height, width = frame.shape[:2]
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
@@ -193,10 +200,11 @@ def estimate_lane_boundaries(lines, image_width, image_height):
     return (x_left, x_right) if x_right > x_left else (None, None)
 
 
-def get_any_color_obstacle_direction(frame, lines):
+def get_obstacle_direction_by_contour(frame, lines):
     """
-    검은색 바닥과 흰색 차선을 제외한 '나머지 모든 색상'을 장애물로 판단하여
-    장애물 위치의 반대 방향 회피값을 구합니다.
+    [Otsu 이진화 + 윤곽선(Contour) 기반 장애물 방향 추출]
+    특정 HSV 색상을 고정하지 않고, 차선 내부 영역의 적응형 명암 차이로
+    독립된 덩어리(Contour)를 감지하여 장애물 반대 방향을 구합니다.
     """
     height, width = frame.shape[:2]
     x_left, x_right = estimate_lane_boundaries(lines, width, height)
@@ -206,7 +214,7 @@ def get_any_color_obstacle_direction(frame, lines):
 
     lane_center = (x_left + x_right) / 2.0
     lane_px = x_right - x_left
-    margin_px = int(lane_px * 0.08)
+    margin_px = int(lane_px * 0.10)  # 차선 선분 오인식 방지를 위한 10% 안쪽 마진
 
     y1, y2 = int(height * 0.52), int(height * 0.84)
     x1 = max(0, int(x_left + margin_px))
@@ -216,43 +224,28 @@ def get_any_color_obstacle_direction(frame, lines):
         return AvoidDirection.LEFT
 
     roi = frame[y1:y2, x1:x2]
-    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
 
-    # 1. 검은색 바닥 영역 (V <= 60)
-    mask_black = cv2.inRange(
-        hsv, 
-        np.array([0, 0, 0], np.uint8), 
-        np.array([179, 255, 60], np.uint8)
-    )
+    # Otsu 자동 이진화: 바닥 배경과 명암 차이를 보이는 입체 덩어리 자동 분리
+    _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-    # 2. 흰색 차선 영역 (S <= 50, V >= 170)
-    mask_white = cv2.inRange(
-        hsv, 
-        np.array([0, 0, 170], np.uint8), 
-        np.array([179, 50, 255], np.uint8)
-    )
-
-    # 바닥 + 차선 영역 결합
-    floor_and_lane = cv2.bitwise_or(mask_black, mask_white)
-
-    # 바닥과 차선이 아닌 '나머지 모든 색상' 추출 (반전 마스크)
-    mask_obstacle = cv2.bitwise_not(floor_and_lane)
-
-    # 노이즈 필터링
+    # 모폴로지 연산으로 가벼운 잔여 노이즈 제거
     kernel = np.ones((5, 5), np.uint8)
-    mask_obstacle = cv2.morphologyEx(mask_obstacle, cv2.MORPH_OPEN, kernel)
-    mask_obstacle = cv2.morphologyEx(mask_obstacle, cv2.MORPH_CLOSE, kernel)
+    thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+    thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
 
-    contours, _ = cv2.findContours(mask_obstacle, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    min_area = max(30, int((x2 - x1) * (y2 - y1) * 0.005))
-    contours = [c for c in contours if cv2.contourArea(c) >= min_area]
+    # 윤곽선(Contour) 추출
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    min_area = max(40, int((x2 - x1) * (y2 - y1) * 0.01))
+    valid_contours = [c for c in contours if cv2.contourArea(c) >= min_area]
 
-    if contours:
-        contour = max(contours, key=cv2.contourArea)
-        bx, by, bw, bh = cv2.boundingRect(contour)
+    if valid_contours:
+        largest_contour = max(valid_contours, key=cv2.contourArea)
+        bx, by, bw, bh = cv2.boundingRect(largest_contour)
         obs_center = x1 + bx + (bw / 2.0)
 
-        # 장애물이 차선 중앙 기준 우측이면 LEFT, 좌측이면 RIGHT
+        # 장애물 위치가 차선 중앙 기준 우측이면 LEFT, 좌측이면 RIGHT
         if obs_center >= lane_center:
             return AvoidDirection.LEFT
         else:
@@ -340,9 +333,9 @@ def run_fsm(error, is_detected, frame, lines, left_d, front_d, right_d):
     # [1] 일반 차선 추종
     if state == State.LANE_FOLLOWING:
         if front_obstacle_detected(front_d):
-            # 장애물 색상에 상관없이 반전 마스크로 위치 감지 후 방향 결정
-            avoid_direction = get_any_color_obstacle_direction(frame, lines)
-            print(f"[OBSTACLE DETECTED] Multi-Color Filter -> Avoid {avoid_direction.name}")
+            # Canny + Contour 기반 윤곽선 분석으로 회피 방향 결정
+            avoid_direction = get_obstacle_direction_by_contour(frame, lines)
+            print(f"[CONTOUR AVOID START] Contour Filter -> Avoid {avoid_direction.name}")
             transition(State.AVOID_TURN_OUT)
         elif not is_detected:
             force_stop()
@@ -350,21 +343,21 @@ def run_fsm(error, is_detected, frame, lines, left_d, front_d, right_d):
             set_command(NORMAL_SPEED, None, error=error)
         return
 
-    # [2] S자 회피 1단계: 대각선 틀기
+    # [2] 넓은 S자 회피 1단계: 대각선 틀기 (0.45초 동안 크게 이동)
     if state == State.AVOID_TURN_OUT:
         set_command(AVOID_SPEED, avoid_direction.value * TURN_ANGULAR_SPEED)
         if state_elapsed() >= TURN_OUT_TIME_S:
             transition(State.AVOID_ALIGN)
         return
 
-    # [3] S자 회피 2단계: 평행 정렬
+    # [3] 넓은 S자 회피 2단계: 차선 평행 정렬 (0.45초)
     if state == State.AVOID_ALIGN:
         set_command(AVOID_SPEED, -avoid_direction.value * TURN_ANGULAR_SPEED)
         if state_elapsed() >= ALIGN_TIME_S:
             transition(State.AVOID_FORWARD)
         return
 
-    # [4] 회피 3단계: 장애물 측면 직진 통과 (75cm)
+    # [4] 회피 3단계: 여유 공간 직진 통과 (90cm)
     if state == State.AVOID_FORWARD:
         set_command(PASS_SPEED, 0.0)
         if state_elapsed() >= PASS_TIMEOUT_S:
@@ -455,7 +448,7 @@ def main():
                 annotated, f"Avoid Dir: {avoid_direction.name}", (10, 50),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 0), 1
             )
-            cv2.imshow("UGV02 Multi-Color Vision", annotated)
+            cv2.imshow("UGV02 Edge/Contour Avoidance", annotated)
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
 
