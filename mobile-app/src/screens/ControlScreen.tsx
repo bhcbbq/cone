@@ -458,48 +458,18 @@ export function RobotControlScreen({
             <View style={styles.section}>
               <View style={styles.speedCard}>
                 <View style={styles.speedHeader}>
-                  <View
-                    style={styles.speedTitleRow}
-                  >
-                    <View
-                      style={styles.speedIconBox}
-                    >
-                      <Ionicons
-                        name="speedometer-outline"
-                        size={18}
-                        color={colors.accent}
-                      />
-                    </View>
-
-                    <View>
-                      <Text
-                        style={styles.speedTitle}
-                      >
-                        주행 속도
-                      </Text>
-
-                      <Text
-                        style={
-                          styles.speedDescription
-                        }
-                      >
-                        주행 중에도 조절할 수 있습니다
-                      </Text>
-                    </View>
-                  </View>
-
-                  <View
-                    style={styles.speedValueBadge}
-                  >
-                    <Text
-                      style={styles.speedValue}
-                    >
-                      {Math.round(
-                        currentSpeed * 100
-                      )}
-                      %
+                  <View style={styles.speedTextGroup}>
+                    <Text style={styles.speedTitle}>
+                      주행 속도
+                    </Text>
+                    <Text style={styles.speedDescription}>
+                      주행 중에도 조절할 수 있습니다
                     </Text>
                   </View>
+
+                  <Text style={styles.speedValue}>
+                    {Math.round(currentSpeed * 100)}%
+                  </Text>
                 </View>
 
                 <View
@@ -1079,9 +1049,9 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.border,
     borderRadius: 24,
-    paddingHorizontal: spacing.lg,
-    paddingTop: spacing.md,
-    paddingBottom: spacing.md,
+    paddingHorizontal: 22,
+    paddingTop: 20,
+    paddingBottom: 18,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 3 },
     shadowOpacity: 0.08,
@@ -1091,76 +1061,63 @@ const styles = StyleSheet.create({
 
   speedHeader: {
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     justifyContent: 'space-between',
-    marginBottom: 4,
+    marginBottom: 12,
   },
 
-  speedTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
+  speedTextGroup: {
     flex: 1,
-    paddingRight: spacing.sm,
-  },
-
-  speedIconBox: {
-    width: 36,
-    height: 36,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: colors.statusArrivedSoft,
-    marginRight: spacing.sm,
+    paddingRight: 12,
   },
 
   speedTitle: {
     ...typography.h2,
-    color: colors.textPrimary,
-    fontSize: 15,
+    color: colors.textMuted,
+    fontSize: 14,
+    fontWeight: '700',
   },
 
   speedDescription: {
     ...typography.caption,
     color: colors.textMuted,
     fontSize: 11,
-    marginTop: 3,
-  },
-
-  speedValueBadge: {
-    minWidth: 60,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 16,
-    backgroundColor: colors.statusArrivedSoft,
-    alignItems: 'center',
-    justifyContent: 'center',
+    marginTop: 5,
+    lineHeight: 16,
   },
 
   speedValue: {
-    ...typography.h2,
+    ...typography.h1,
     color: colors.accent,
-    fontSize: 16,
+    fontSize: 20,
+    fontWeight: '800',
+    lineHeight: 26,
+  },
+
+  sliderTouchArea: {
+    width: '100%',
+    paddingVertical: 4,
   },
 
   slider: {
     width: '100%',
-    height: 38,
-    marginTop: 4,
+    height: 44,
   },
 
   speedRangeRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 6,
-    marginTop: -1,
+    paddingHorizontal: 2,
+    marginTop: 0,
   },
 
   speedRangeText: {
     ...typography.caption,
     color: colors.textMuted,
     fontSize: 11,
-    lineHeight: 16,
+    lineHeight: 15,
+    fontWeight: '600',
     includeFontPadding: false,
   },
 
@@ -1218,15 +1175,12 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.border,
     borderRadius: 24,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.lg,
+    paddingHorizontal: 22,
+    paddingVertical: 20,
     marginBottom: spacing.md,
-    backgroundColor: colors.surface,
+    backgroundColor: colors.white,
     shadowColor: '#000',
-    shadowOffset: {
-      width: 0,
-      height: 3,
-    },
+    shadowOffset: { width: 0, height: 3 },
     shadowOpacity: 0.08,
     shadowRadius: 6,
     elevation: 3,
@@ -1234,22 +1188,24 @@ const styles = StyleSheet.create({
 
   manualCardLabel: {
     ...typography.h2,
-    color: colors.textPrimary,
-    fontSize: 15,
+    color: colors.textMuted,
+    fontSize: 14,
+    fontWeight: '700',
   },
 
   manualCardHint: {
     ...typography.caption,
     color: colors.textMuted,
     fontSize: 11,
-    marginTop: 4,
-    lineHeight: 17,
+    marginTop: 5,
+    lineHeight: 16,
   },
 
   manualSpeedValue: {
     ...typography.h1,
     color: colors.accent,
-    fontSize: 22,
+    fontSize: 20,
+    fontWeight: '800',
     marginLeft: spacing.md,
   },
 
@@ -1257,14 +1213,12 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.border,
     borderRadius: 24,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.lg,
-    backgroundColor: colors.surface,
+    paddingHorizontal: 22,
+    paddingTop: 20,
+    paddingBottom: 24,
+    backgroundColor: colors.white,
     shadowColor: '#000',
-    shadowOffset: {
-      width: 0,
-      height: 3,
-    },
+    shadowOffset: { width: 0, height: 3 },
     shadowOpacity: 0.08,
     shadowRadius: 6,
     elevation: 3,
@@ -1272,8 +1226,9 @@ const styles = StyleSheet.create({
 
   manualCardTitle: {
     ...typography.h2,
-    color: colors.textPrimary,
-    fontSize: 16,
+    color: colors.textMuted,
+    fontSize: 14,
+    fontWeight: '700',
   },
 
   directionPad: {
@@ -1288,25 +1243,25 @@ const styles = StyleSheet.create({
   },
 
   directionButton: {
-    width: 82,
-    height: 70,
+    width: 84,
+    height: 72,
     borderRadius: 18,
     backgroundColor: colors.surfaceMuted,
     borderWidth: 1,
     borderColor: colors.border,
     alignItems: 'center',
     justifyContent: 'center',
-    marginHorizontal: 6,
+    marginHorizontal: 7,
   },
 
   manualStopButton: {
-    width: 82,
-    height: 70,
+    width: 84,
+    height: 72,
     borderRadius: 18,
     backgroundColor: colors.danger,
     alignItems: 'center',
     justifyContent: 'center',
-    marginHorizontal: 6,
+    marginHorizontal: 7,
   },
 
   manualPressed: {
@@ -1318,10 +1273,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'flex-start',
     marginTop: spacing.md,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
-    borderRadius: 20,
-    backgroundColor: colors.surface,
+    paddingHorizontal: 18,
+    paddingVertical: 14,
+    borderRadius: 18,
+    backgroundColor: colors.surfaceMuted,
     borderWidth: 1,
     borderColor: colors.border,
   },
