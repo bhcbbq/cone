@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 
 import {
   ActivityIndicator,
@@ -8,10 +8,12 @@ import {
   StatusBar,
   StyleSheet,
   Text,
+  useWindowDimensions,
   View,
 } from 'react-native';
 
 import { Ionicons } from '@expo/vector-icons';
+import Slider from '@react-native-community/slider';
 
 import {
   ConnectionStatus,
@@ -67,6 +69,15 @@ interface Props {
   onReturn?: () => void;
 
   onResetDistance?: () => void;
+
+  // 나중에 실제 속도 제어를 연결할 때 사용
+  speed?: number;
+
+  // 슬라이더 이동 중 UI 값 반영용
+  onSpeedChange?: (value: number) => void;
+
+  // 슬라이더에서 손을 뗐을 때 실제 명령 전송용
+  onSpeedChangeComplete?: (value: number) => void;
 }
 
 export function RobotControlScreen({
@@ -90,7 +101,30 @@ export function RobotControlScreen({
   onStop,
   onReturn,
   onResetDistance,
+
+  speed,
+  onSpeedChange,
+  onSpeedChangeComplete,
 }: Props) {
+  const { width: screenWidth } = useWindowDimensions();
+
+  // speed prop을 아직 index.tsx에서 넘기지 않아도 UI 확인 가능하도록
+  // 내부 기본값 30% 사용
+  const [localSpeed, setLocalSpeed] = useState(
+    speed ?? 0.3
+  );
+
+  useEffect(() => {
+    if (typeof speed === 'number') {
+      setLocalSpeed(speed);
+    }
+  }, [speed]);
+
+  const currentSpeed =
+    typeof speed === 'number'
+      ? speed
+      : localSpeed;
+
   const isBusy =
     robotStatus === 'driving' ||
     robotStatus === 'returning';
@@ -110,6 +144,26 @@ export function RobotControlScreen({
   const hc12Connecting =
     hc12Status === 'connecting';
 
+  const handleSpeedChange = (
+    value: number
+  ) => {
+    if (typeof speed !== 'number') {
+      setLocalSpeed(value);
+    }
+
+    onSpeedChange?.(value);
+  };
+
+  const handleSpeedChangeComplete = (
+    value: number
+  ) => {
+    if (typeof speed !== 'number') {
+      setLocalSpeed(value);
+    }
+
+    onSpeedChangeComplete?.(value);
+  };
+
   return (
     <SafeAreaView style={styles.safe}>
       <StatusBar
@@ -119,284 +173,682 @@ export function RobotControlScreen({
         }
       />
 
-      {/* =========================
-          스크롤되는 화면 영역
-      ========================= */}
-
+      {/*
+        좌우 페이지
+        1페이지: 기존 자동 주행 화면
+        2페이지: 수동 조작 화면
+      */}
       <ScrollView
-        style={styles.scroll}
-        contentContainerStyle={
-          styles.container
-        }
-        showsVerticalScrollIndicator={
+        horizontal
+        pagingEnabled
+        showsHorizontalScrollIndicator={
           false
         }
-        keyboardShouldPersistTaps="handled"
+        style={styles.pager}
       >
         {/* =========================
-            상단 헤더
+            1PAGE - 자동 주행
         ========================= */}
-
-        <View style={styles.header}>
-          <View style={styles.headerTop}>
-            <View style={styles.headerText}>
-              <Text style={styles.eyebrow}>
-                SMART LAVA-CONE UGV
-              </Text>
-
-              <Text style={styles.title}>
-                주행 관리
-              </Text>
-
-              <Text style={styles.deviceName}>
-                {deviceName ??
-                  'ESP32_CONE'}
-              </Text>
-            </View>
-
-            {/* 연결 / 연결 해제 */}
-
-            <Pressable
-              onPress={
-                isConnected
-                  ? onDisconnect
-                  : onConnect
-              }
-              disabled={isConnecting}
-              style={({ pressed }) => [
-                styles.connectionButton,
-
-                isConnected
-                  ? styles.disconnectButton
-                  : styles.connectButton,
-
-                isConnecting &&
-                  styles.connectionButtonDisabled,
-
-                pressed &&
-                  !isConnecting && {
-                    opacity: 0.8,
-                  },
-              ]}
-            >
-              {isConnecting ? (
-                <ActivityIndicator
-                  size="small"
-                  color={colors.white}
-                />
-              ) : (
-                <Ionicons
-                  name={
-                    isConnected
-                      ? 'close-circle-outline'
-                      : 'bluetooth'
-                  }
-                  size={17}
-                  color={
-                    isConnected
-                      ? colors.danger
-                      : colors.white
-                  }
-                />
-              )}
-
-              <Text
-                style={[
-                  styles.connectionButtonText,
-
-                  isConnected
-                    ? styles.disconnectText
-                    : styles.connectText,
-                ]}
-              >
-                {isConnecting
-                  ? '연결 중'
-                  : isConnected
-                    ? '연결 해제'
-                    : '연결하기'}
-              </Text>
-            </Pressable>
-          </View>
-
-          {/* BLE / HC-12 상태 */}
-
-          <View
-            style={
-              styles.statusBadgeRow
+        <View
+          style={[
+            styles.page,
+            { width: screenWidth },
+          ]}
+        >
+          <ScrollView
+            style={styles.scroll}
+            contentContainerStyle={
+              styles.container
             }
+            showsVerticalScrollIndicator={
+              false
+            }
+            keyboardShouldPersistTaps="handled"
           >
-            <View
-              style={[
-                styles.statusBadge,
-                {
-                  backgroundColor:
+            {/* =========================
+                상단 헤더
+            ========================= */}
+
+            <View style={styles.header}>
+              <View style={styles.headerTop}>
+                <View style={styles.headerText}>
+                  <Text style={styles.eyebrow}>
+                    SMART LAVA-CONE UGV
+                  </Text>
+
+                  <Text style={styles.title}>
+                    주행 관리
+                  </Text>
+
+                  <Text style={styles.deviceName}>
+                    {deviceName ??
+                      'ESP32_CONE'}
+                  </Text>
+                </View>
+
+                {/* 연결 / 연결 해제 */}
+
+                <Pressable
+                  onPress={
                     isConnected
-                      ? colors.statusDrivingSoft
-                      : isConnecting
-                        ? colors.statusArrivedSoft
-                        : colors.statusStoppedSoft,
-                },
-              ]}
-            >
-              <Ionicons
-                name="bluetooth"
-                size={17}
-                color={bleColor}
-              />
+                      ? onDisconnect
+                      : onConnect
+                  }
+                  disabled={isConnecting}
+                  style={({ pressed }) => [
+                    styles.connectionButton,
 
-              <Text
-                style={[
-                  styles.statusBadgeText,
-                  {
-                    color: bleColor,
-                  },
-                ]}
-              >
-                {isConnected
-                  ? 'BLE 연결'
-                  : isConnecting
-                    ? 'BLE 연결 중'
-                    : 'BLE 미연결'}
-              </Text>
-            </View>
+                    isConnected
+                      ? styles.disconnectButton
+                      : styles.connectButton,
 
-            <View
-              style={[
-                styles.statusBadge,
-                {
-                  backgroundColor:
-                    hc12Connected
-                      ? colors.statusDrivingSoft
-                      : hc12Connecting
-                        ? colors.statusArrivedSoft
-                        : colors.surfaceMuted,
-                },
-              ]}
-            >
-              <Ionicons
-                name="radio-outline"
-                size={17}
-                color={
-                  hc12Connected
-                    ? colors.success
-                    : hc12Connecting
-                      ? colors.warning
-                      : colors.textMuted
+                    isConnecting &&
+                    styles.connectionButtonDisabled,
+
+                    pressed &&
+                    !isConnecting && {
+                      opacity: 0.8,
+                    },
+                  ]}
+                >
+                  {isConnecting ? (
+                    <ActivityIndicator
+                      size="small"
+                      color={colors.white}
+                    />
+                  ) : (
+                    <Ionicons
+                      name={
+                        isConnected
+                          ? 'close-circle-outline'
+                          : 'bluetooth'
+                      }
+                      size={17}
+                      color={
+                        isConnected
+                          ? colors.danger
+                          : colors.white
+                      }
+                    />
+                  )}
+
+                  <Text
+                    style={[
+                      styles.connectionButtonText,
+
+                      isConnected
+                        ? styles.disconnectText
+                        : styles.connectText,
+                    ]}
+                  >
+                    {isConnecting
+                      ? '연결 중'
+                      : isConnected
+                        ? '연결 해제'
+                        : '연결하기'}
+                  </Text>
+                </Pressable>
+              </View>
+
+              {/* BLE / HC-12 상태 */}
+
+              <View
+                style={
+                  styles.statusBadgeRow
                 }
-              />
+              >
+                <View
+                  style={[
+                    styles.statusBadge,
+                    {
+                      backgroundColor:
+                        isConnected
+                          ? colors.statusDrivingSoft
+                          : isConnecting
+                            ? colors.statusArrivedSoft
+                            : colors.statusStoppedSoft,
+                    },
+                  ]}
+                >
+                  <Ionicons
+                    name="bluetooth"
+                    size={17}
+                    color={bleColor}
+                  />
 
-              <Text
-                style={[
-                  styles.statusBadgeText,
-                  {
-                    color:
+                  <Text
+                    style={[
+                      styles.statusBadgeText,
+                      {
+                        color: bleColor,
+                      },
+                    ]}
+                  >
+                    {isConnected
+                      ? 'BLE 연결'
+                      : isConnecting
+                        ? 'BLE 연결 중'
+                        : 'BLE 미연결'}
+                  </Text>
+                </View>
+
+                <View
+                  style={[
+                    styles.statusBadge,
+                    {
+                      backgroundColor:
+                        hc12Connected
+                          ? colors.statusDrivingSoft
+                          : hc12Connecting
+                            ? colors.statusArrivedSoft
+                            : colors.surfaceMuted,
+                    },
+                  ]}
+                >
+                  <Ionicons
+                    name="radio-outline"
+                    size={17}
+                    color={
                       hc12Connected
                         ? colors.success
                         : hc12Connecting
                           ? colors.warning
-                          : colors.textMuted,
-                  },
-                ]}
-              >
-                {hc12Connected
-                  ? 'HC-12 연결'
-                  : hc12Connecting
-                    ? 'HC-12 연결 중'
-                    : 'HC-12 미연결'}
-              </Text>
+                          : colors.textMuted
+                    }
+                  />
+
+                  <Text
+                    style={[
+                      styles.statusBadgeText,
+                      {
+                        color:
+                          hc12Connected
+                            ? colors.success
+                            : hc12Connecting
+                              ? colors.warning
+                              : colors.textMuted,
+                      },
+                    ]}
+                  >
+                    {hc12Connected
+                      ? 'HC-12 연결'
+                      : hc12Connecting
+                        ? 'HC-12 연결 중'
+                        : 'HC-12 미연결'}
+                  </Text>
+                </View>
+              </View>
             </View>
+
+            {/* 페이지 안내 */}
+            <View style={styles.pageGuide}>
+              <View style={styles.pageDots}>
+                <View
+                  style={[
+                    styles.pageDot,
+                    styles.pageDotActive,
+                  ]}
+                />
+                <View style={styles.pageDot} />
+              </View>
+
+              <View style={styles.swipeHint}>
+                <Text style={styles.swipeHintText}>
+                  수동 조작
+                </Text>
+                <Ionicons
+                  name="chevron-forward"
+                  size={16}
+                  color={colors.textMuted}
+                />
+              </View>
+            </View>
+
+            {/* =========================
+                도착 완료 알림
+            ========================= */}
+
+            <ArrivalBanner
+              robotStatus={robotStatus}
+              targetDistance={
+                activeTargetDistance
+              }
+            />
+
+            {/* =========================
+                경고
+            ========================= */}
+
+            <WarningBanner
+              warnings={warnings}
+            />
+
+            {/* =========================
+                진행률
+            ========================= */}
+
+            <View style={styles.section}>
+              <ProgressCard
+                robotStatus={robotStatus}
+                targetDistance={
+                  activeTargetDistance
+                }
+                currentDistance={
+                  currentDistance
+                }
+              />
+            </View>
+
+            {/* =========================
+                목표거리
+            ========================= */}
+
+            <View style={styles.section}>
+              <DistanceInputCard
+                value={targetDistance}
+                editable={!isBusy}
+                onChange={
+                  onTargetDistanceChange
+                }
+              />
+            </View>
+
+            {/* =========================
+                주행 속도
+                - 목표거리 바로 아래
+                - 주행 중에도 조절 가능
+            ========================= */}
+
+            <View style={styles.section}>
+              <View style={styles.speedCard}>
+                <View style={styles.speedHeader}>
+                  <View
+                    style={styles.speedTitleRow}
+                  >
+                    <View
+                      style={styles.speedIconBox}
+                    >
+                      <Ionicons
+                        name="speedometer-outline"
+                        size={18}
+                        color={colors.accent}
+                      />
+                    </View>
+
+                    <View>
+                      <Text
+                        style={styles.speedTitle}
+                      >
+                        주행 속도
+                      </Text>
+
+                      <Text
+                        style={
+                          styles.speedDescription
+                        }
+                      >
+                        주행 중에도 조절할 수 있습니다
+                      </Text>
+                    </View>
+                  </View>
+
+                  <View
+                    style={styles.speedValueBadge}
+                  >
+                    <Text
+                      style={styles.speedValue}
+                    >
+                      {Math.round(
+                        currentSpeed * 100
+                      )}
+                      %
+                    </Text>
+                  </View>
+                </View>
+
+                <Slider
+                  style={styles.slider}
+                  minimumValue={0.1}
+                  maximumValue={0.5}
+                  step={0.05}
+                  value={currentSpeed}
+                  onValueChange={
+                    handleSpeedChange
+                  }
+                  onSlidingComplete={
+                    handleSpeedChangeComplete
+                  }
+                  minimumTrackTintColor={
+                    colors.accent
+                  }
+                  maximumTrackTintColor={
+                    colors.border
+                  }
+                  thumbTintColor={
+                    colors.accent
+                  }
+                />
+
+                <View
+                  style={styles.speedRangeRow}
+                >
+                  <Text
+                    style={styles.speedRangeText}
+                  >
+                    10%
+                  </Text>
+
+                  <Text
+                    style={styles.speedRangeText}
+                  >
+                    50%
+                  </Text>
+                </View>
+              </View>
+            </View>
+
+            {/*
+              하단 고정 컨트롤에 가리지 않도록
+              마지막에 공간 확보
+            */}
+
+            <View
+              style={styles.bottomSpacer}
+            />
+          </ScrollView>
+
+          {/* =========================
+              하단 고정 컨트롤
+          ========================= */}
+
+          <View
+            style={styles.bottomControls}
+          >
+            <ControlButtons
+              robotStatus={robotStatus}
+              targetDistance={
+                targetDistance
+              }
+              isBleConnected={
+                connectionStatus ===
+                'connected'
+              }
+              onStart={onStart}
+              onStop={onStop}
+              onReturn={onReturn}
+              onResetDistance={
+                onResetDistance
+              }
+            />
           </View>
         </View>
 
         {/* =========================
-            도착 완료 알림
+            2PAGE - 수동 조작
         ========================= */}
-
-        <ArrivalBanner
-          robotStatus={robotStatus}
-          targetDistance={
-            activeTargetDistance
-          }
-        />
-
-        {/* =========================
-            경고
-        ========================= */}
-
-        <WarningBanner
-          warnings={warnings}
-        />
-
-        {/* =========================
-            진행률
-        ========================= */}
-
-        <View style={styles.section}>
-          <ProgressCard
-            robotStatus={robotStatus}
-            targetDistance={
-              activeTargetDistance
-            }
-            currentDistance={
-              currentDistance
-            }
-          />
-        </View>
-
-        {/* =========================
-            목표거리
-        ========================= */}
-
-        <View style={styles.section}>
-          <DistanceInputCard
-            value={targetDistance}
-            editable={!isBusy}
-            onChange={
-              onTargetDistanceChange
-            }
-          />
-        </View>
-
-        {/*
-          하단 고정 컨트롤에 가리지 않도록
-          마지막에 공간 확보
-        */}
-
         <View
-          style={styles.bottomSpacer}
-        />
+          style={[
+            styles.page,
+            { width: screenWidth },
+          ]}
+        >
+          <ScrollView
+            style={styles.scroll}
+            contentContainerStyle={
+              styles.manualContainer
+            }
+            showsVerticalScrollIndicator={
+              false
+            }
+          >
+            <View style={styles.manualHeader}>
+              <View>
+                <Text style={styles.eyebrow}>
+                  SMART LAVA-CONE UGV
+                </Text>
+
+                <Text style={styles.title}>
+                  수동 조작
+                </Text>
+
+                <Text style={styles.deviceName}>
+                  {deviceName ??
+                    'ESP32_CONE'}
+                </Text>
+              </View>
+
+              <Ionicons
+                name="game-controller-outline"
+                size={30}
+                color={colors.accent}
+              />
+            </View>
+
+            <View style={styles.pageGuide}>
+              <View style={styles.pageDots}>
+                <View style={styles.pageDot} />
+                <View
+                  style={[
+                    styles.pageDot,
+                    styles.pageDotActive,
+                  ]}
+                />
+              </View>
+
+              <View style={styles.swipeHint}>
+                <Ionicons
+                  name="chevron-back"
+                  size={16}
+                  color={colors.textMuted}
+                />
+                <Text style={styles.swipeHintText}>
+                  자동 주행
+                </Text>
+              </View>
+            </View>
+
+            {/* 연결 상태 간단 표시 */}
+            <View style={styles.manualStatusRow}>
+              <View
+                style={[
+                  styles.statusBadge,
+                  {
+                    backgroundColor:
+                      isConnected
+                        ? colors.statusDrivingSoft
+                        : colors.statusStoppedSoft,
+                  },
+                ]}
+              >
+                <Ionicons
+                  name="bluetooth"
+                  size={17}
+                  color={bleColor}
+                />
+
+                <Text
+                  style={[
+                    styles.statusBadgeText,
+                    { color: bleColor },
+                  ]}
+                >
+                  {isConnected
+                    ? 'BLE 연결'
+                    : 'BLE 미연결'}
+                </Text>
+              </View>
+
+              <View
+                style={[
+                  styles.statusBadge,
+                  {
+                    backgroundColor:
+                      hc12Connected
+                        ? colors.statusDrivingSoft
+                        : colors.surfaceMuted,
+                  },
+                ]}
+              >
+                <Ionicons
+                  name="radio-outline"
+                  size={17}
+                  color={
+                    hc12Connected
+                      ? colors.success
+                      : colors.textMuted
+                  }
+                />
+
+                <Text
+                  style={[
+                    styles.statusBadgeText,
+                    {
+                      color: hc12Connected
+                        ? colors.success
+                        : colors.textMuted,
+                    },
+                  ]}
+                >
+                  {hc12Connected
+                    ? 'HC-12 연결'
+                    : 'HC-12 미연결'}
+                </Text>
+              </View>
+            </View>
+
+            {/* 현재 속도 표시 */}
+            <View style={styles.manualSpeedCard}>
+              <View>
+                <Text style={styles.manualCardLabel}>
+                  현재 주행 속도
+                </Text>
+                <Text style={styles.manualCardHint}>
+                  자동 주행 화면의 슬라이더와 동일한 값입니다
+                </Text>
+              </View>
+
+              <Text style={styles.manualSpeedValue}>
+                {Math.round(
+                  currentSpeed * 100
+                )}
+                %
+              </Text>
+            </View>
+
+            {/* 방향키 */}
+            <View style={styles.manualCard}>
+              <Text style={styles.manualCardTitle}>
+                방향 조작
+              </Text>
+
+              <Text style={styles.manualCardHint}>
+                현재는 UI만 구성되어 있으며 실제 주행 명령은 다음 단계에서 연결합니다.
+              </Text>
+
+              <View style={styles.directionPad}>
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.directionButton,
+                    pressed &&
+                    styles.manualPressed,
+                  ]}
+                >
+                  <Ionicons
+                    name="arrow-up"
+                    size={30}
+                    color={colors.textPrimary}
+                  />
+                </Pressable>
+
+                <View style={styles.directionMiddleRow}>
+                  <Pressable
+                    style={({ pressed }) => [
+                      styles.directionButton,
+                      pressed &&
+                      styles.manualPressed,
+                    ]}
+                  >
+                    <Ionicons
+                      name="arrow-back"
+                      size={30}
+                      color={colors.textPrimary}
+                    />
+                  </Pressable>
+
+                  <Pressable
+                    style={({ pressed }) => [
+                      styles.manualStopButton,
+                      pressed &&
+                      styles.manualPressed,
+                    ]}
+                  >
+                    <Ionicons
+                      name="stop"
+                      size={27}
+                      color={colors.white}
+                    />
+                  </Pressable>
+
+                  <Pressable
+                    style={({ pressed }) => [
+                      styles.directionButton,
+                      pressed &&
+                      styles.manualPressed,
+                    ]}
+                  >
+                    <Ionicons
+                      name="arrow-forward"
+                      size={30}
+                      color={colors.textPrimary}
+                    />
+                  </Pressable>
+                </View>
+
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.directionButton,
+                    pressed &&
+                    styles.manualPressed,
+                  ]}
+                >
+                  <Ionicons
+                    name="arrow-down"
+                    size={30}
+                    color={colors.textPrimary}
+                  />
+                </Pressable>
+              </View>
+            </View>
+
+            <View style={styles.manualNotice}>
+              <Ionicons
+                name="information-circle-outline"
+                size={18}
+                color={colors.textMuted}
+              />
+              <Text style={styles.manualNoticeText}>
+                실제 제어 연결 시 버튼을 누르는 동안 이동하고 손을 떼면 즉시 정지하도록 구현할 예정입니다.
+              </Text>
+            </View>
+          </ScrollView>
+        </View>
       </ScrollView>
-
-      {/* =========================
-          하단 고정 컨트롤
-      ========================= */}
-
-      <View
-        style={styles.bottomControls}
-      >
-        <ControlButtons
-          robotStatus={robotStatus}
-          targetDistance={
-            targetDistance
-          }
-          isBleConnected={
-            connectionStatus ===
-            'connected'
-          }
-          onStart={onStart}
-          onStop={onStop}
-          onReturn={onReturn}
-          onResetDistance={
-            onResetDistance
-          }
-        />
-      </View>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   safe: {
+    flex: 1,
+    backgroundColor:
+      colors.background,
+  },
+
+  pager: {
+    flex: 1,
+  },
+
+  page: {
     flex: 1,
     backgroundColor:
       colors.background,
@@ -560,6 +1012,46 @@ const styles = StyleSheet.create({
   },
 
   // =========================
+  // PAGE GUIDE
+  // =========================
+
+  pageGuide: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: spacing.md,
+  },
+
+  pageDots: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+
+  pageDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: colors.border,
+    marginRight: 6,
+  },
+
+  pageDotActive: {
+    width: 18,
+    backgroundColor: colors.accent,
+  },
+
+  swipeHint: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+
+  swipeHintText: {
+    ...typography.caption,
+    color: colors.textMuted,
+    fontSize: 12,
+  },
+
+  // =========================
   // CONTENT
   // =========================
 
@@ -570,6 +1062,95 @@ const styles = StyleSheet.create({
 
   bottomSpacer: {
     height: 170,
+  },
+
+  // =========================
+  // SPEED CARD
+  // =========================
+
+  speedCard: {
+    backgroundColor:
+      colors.background,
+    borderWidth: 1,
+    borderColor:
+      colors.border,
+    borderRadius:
+      radius.pill,
+    paddingHorizontal:
+      spacing.md,
+    paddingVertical:
+      spacing.md,
+  },
+
+  speedHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: spacing.sm,
+  },
+
+  speedTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    paddingRight: spacing.sm,
+  },
+
+  speedIconBox: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor:
+      colors.statusArrivedSoft,
+    marginRight: spacing.sm,
+  },
+
+  speedTitle: {
+    ...typography.h2,
+    color: colors.textPrimary,
+    fontSize: 15,
+  },
+
+  speedDescription: {
+    ...typography.caption,
+    color: colors.textMuted,
+    fontSize: 11,
+    marginTop: 3,
+  },
+
+  speedValueBadge: {
+    minWidth: 54,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: radius.pill,
+    backgroundColor:
+      colors.statusArrivedSoft,
+    alignItems: 'center',
+  },
+
+  speedValue: {
+    ...typography.h2,
+    color: colors.accent,
+    fontSize: 16,
+  },
+
+  slider: {
+    width: '100%',
+    height: 42,
+  },
+
+  speedRangeRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingHorizontal: 4,
+  },
+
+  speedRangeText: {
+    ...typography.caption,
+    color: colors.textMuted,
+    fontSize: 11,
   },
 
   // =========================
@@ -593,5 +1174,132 @@ const styles = StyleSheet.create({
 
     borderTopColor:
       colors.border,
+  },
+
+  // =========================
+  // MANUAL PAGE
+  // =========================
+
+  manualContainer: {
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.md + 24,
+    paddingBottom: 40,
+  },
+
+  manualHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: spacing.lg,
+  },
+
+  manualStatusRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginBottom: spacing.md,
+  },
+
+  manualSpeedCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.pill,
+    padding: spacing.md,
+    marginBottom: spacing.md,
+    backgroundColor: colors.background,
+  },
+
+  manualCardLabel: {
+    ...typography.h2,
+    color: colors.textPrimary,
+    fontSize: 15,
+  },
+
+  manualCardHint: {
+    ...typography.caption,
+    color: colors.textMuted,
+    fontSize: 11,
+    marginTop: 4,
+    lineHeight: 17,
+  },
+
+  manualSpeedValue: {
+    ...typography.h1,
+    color: colors.accent,
+    fontSize: 22,
+    marginLeft: spacing.md,
+  },
+
+  manualCard: {
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.pill,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.lg,
+    backgroundColor: colors.background,
+  },
+
+  manualCardTitle: {
+    ...typography.h2,
+    color: colors.textPrimary,
+    fontSize: 16,
+  },
+
+  directionPad: {
+    alignItems: 'center',
+    marginTop: spacing.lg,
+  },
+
+  directionMiddleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginVertical: 10,
+  },
+
+  directionButton: {
+    width: 72,
+    height: 72,
+    borderRadius: 22,
+    backgroundColor: colors.surfaceMuted,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginHorizontal: 6,
+  },
+
+  manualStopButton: {
+    width: 72,
+    height: 72,
+    borderRadius: 22,
+    backgroundColor: colors.danger,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginHorizontal: 6,
+  },
+
+  manualPressed: {
+    opacity: 0.72,
+    transform: [{ scale: 0.97 }],
+  },
+
+  manualNotice: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginTop: spacing.md,
+    padding: spacing.md,
+    borderRadius: radius.pill,
+    backgroundColor: colors.surfaceMuted,
+  },
+
+  manualNoticeText: {
+    ...typography.caption,
+    flex: 1,
+    color: colors.textMuted,
+    fontSize: 11,
+    lineHeight: 17,
+    marginLeft: 7,
   },
 });
