@@ -274,6 +274,9 @@ if __name__ == "__main__":
             # 기존 main.py의 화면 표시 유지
             cv2.imshow(window_name, result_image)
 
+            # 추가: ROI 적용 전 전체 Canny 에지 화면 표시
+            cv2.imshow("Canny Edges", edges)
+
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 print("[알림] 사용자가 'q'를 눌러 프로그램을 종료했습니다.")
                 break
