@@ -15,6 +15,8 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import Slider from '@react-native-community/slider';
 
+const sliderThumb = require('../../assets/images/slider-thumb-square.png');
+
 import {
   ConnectionStatus,
   RobotStatus,
@@ -120,10 +122,7 @@ export function RobotControlScreen({
     }
   }, [speed]);
 
-  const currentSpeed =
-    typeof speed === 'number'
-      ? speed
-      : localSpeed;
+  const currentSpeed = localSpeed;
 
   const isBusy =
     robotStatus === 'driving' ||
@@ -147,20 +146,14 @@ export function RobotControlScreen({
   const handleSpeedChange = (
     value: number
   ) => {
-    if (typeof speed !== 'number') {
-      setLocalSpeed(value);
-    }
-
+    setLocalSpeed(value);
     onSpeedChange?.(value);
   };
 
   const handleSpeedChangeComplete = (
     value: number
   ) => {
-    if (typeof speed !== 'number') {
-      setLocalSpeed(value);
-    }
-
+    setLocalSpeed(value);
     onSpeedChangeComplete?.(value);
   };
 
@@ -243,12 +236,12 @@ export function RobotControlScreen({
                       : styles.connectButton,
 
                     isConnecting &&
-                      styles.connectionButtonDisabled,
+                    styles.connectionButtonDisabled,
 
                     pressed &&
-                      !isConnecting && {
-                        opacity: 0.8,
-                      },
+                    !isConnecting && {
+                      opacity: 0.8,
+                    },
                   ]}
                 >
                   {isConnecting ? (
@@ -524,9 +517,7 @@ export function RobotControlScreen({
                   maximumTrackTintColor={
                     colors.border
                   }
-                  thumbTintColor={
-                    colors.accent
-                  }
+                  thumbImage={sliderThumb}
                 />
 
                 <View
@@ -750,7 +741,7 @@ export function RobotControlScreen({
                   style={({ pressed }) => [
                     styles.directionButton,
                     pressed &&
-                      styles.manualPressed,
+                    styles.manualPressed,
                   ]}
                 >
                   <Ionicons
@@ -765,7 +756,7 @@ export function RobotControlScreen({
                     style={({ pressed }) => [
                       styles.directionButton,
                       pressed &&
-                        styles.manualPressed,
+                      styles.manualPressed,
                     ]}
                   >
                     <Ionicons
@@ -779,7 +770,7 @@ export function RobotControlScreen({
                     style={({ pressed }) => [
                       styles.manualStopButton,
                       pressed &&
-                        styles.manualPressed,
+                      styles.manualPressed,
                     ]}
                   >
                     <Ionicons
@@ -793,7 +784,7 @@ export function RobotControlScreen({
                     style={({ pressed }) => [
                       styles.directionButton,
                       pressed &&
-                        styles.manualPressed,
+                      styles.manualPressed,
                     ]}
                   >
                     <Ionicons
@@ -808,7 +799,7 @@ export function RobotControlScreen({
                   style={({ pressed }) => [
                     styles.directionButton,
                     pressed &&
-                      styles.manualPressed,
+                    styles.manualPressed,
                   ]}
                 >
                   <Ionicons
@@ -1216,9 +1207,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.lg,
     marginBottom: spacing.md,
-    backgroundColor: colors.white,
+    backgroundColor: colors.surface,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 3 },
+    shadowOffset: {
+      width: 0,
+      height: 3,
+    },
     shadowOpacity: 0.08,
     shadowRadius: 6,
     elevation: 3,
@@ -1250,11 +1244,13 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     borderRadius: 24,
     paddingHorizontal: spacing.lg,
-    paddingTop: spacing.lg,
-    paddingBottom: spacing.xl,
-    backgroundColor: colors.white,
+    paddingVertical: spacing.lg,
+    backgroundColor: colors.surface,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 3 },
+    shadowOffset: {
+      width: 0,
+      height: 3,
+    },
     shadowOpacity: 0.08,
     shadowRadius: 6,
     elevation: 3,
@@ -1278,25 +1274,25 @@ const styles = StyleSheet.create({
   },
 
   directionButton: {
-    width: 76,
-    height: 76,
+    width: 82,
+    height: 70,
     borderRadius: 18,
     backgroundColor: colors.surfaceMuted,
     borderWidth: 1,
     borderColor: colors.border,
     alignItems: 'center',
     justifyContent: 'center',
-    marginHorizontal: 7,
+    marginHorizontal: 6,
   },
 
   manualStopButton: {
-    width: 76,
-    height: 76,
+    width: 82,
+    height: 70,
     borderRadius: 18,
     backgroundColor: colors.danger,
     alignItems: 'center',
     justifyContent: 'center',
-    marginHorizontal: 7,
+    marginHorizontal: 6,
   },
 
   manualPressed: {
@@ -1308,10 +1304,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'flex-start',
     marginTop: spacing.md,
-    paddingHorizontal: spacing.md,
+    paddingHorizontal: spacing.lg,
     paddingVertical: spacing.md,
     borderRadius: 20,
-    backgroundColor: colors.white,
+    backgroundColor: colors.surface,
     borderWidth: 1,
     borderColor: colors.border,
   },
