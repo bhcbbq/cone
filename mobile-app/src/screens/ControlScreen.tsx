@@ -116,6 +116,8 @@ export function RobotControlScreen({
     speed ?? 0.3
   );
 
+  const [isSliding, setIsSliding] = useState(false);
+
   useEffect(() => {
     if (typeof speed === 'number') {
       setLocalSpeed(speed);
@@ -174,6 +176,7 @@ export function RobotControlScreen({
       <ScrollView
         horizontal
         pagingEnabled
+        scrollEnabled={!isSliding}
         showsHorizontalScrollIndicator={
           false
         }
@@ -499,26 +502,37 @@ export function RobotControlScreen({
                   </View>
                 </View>
 
-                <Slider
-                  style={styles.slider}
-                  minimumValue={0.1}
-                  maximumValue={0.5}
-                  step={0.05}
-                  value={currentSpeed}
-                  onValueChange={
-                    handleSpeedChange
-                  }
-                  onSlidingComplete={
-                    handleSpeedChangeComplete
-                  }
-                  minimumTrackTintColor={
-                    colors.accent
-                  }
-                  maximumTrackTintColor={
-                    colors.border
-                  }
-                  thumbImage={sliderThumb}
-                />
+                <View
+                  style={styles.sliderTouchArea}
+                  onTouchStart={() => setIsSliding(true)}
+                  onTouchEnd={() => setIsSliding(false)}
+                  onTouchCancel={() => setIsSliding(false)}
+                >
+                  <Slider
+                    style={styles.slider}
+                    minimumValue={0.1}
+                    maximumValue={0.5}
+                    step={0.05}
+                    value={currentSpeed}
+                    onValueChange={
+                      handleSpeedChange
+                    }
+                    onSlidingStart={() => {
+                      setIsSliding(true);
+                    }}
+                    onSlidingComplete={(value) => {
+                      setIsSliding(false);
+                      handleSpeedChangeComplete(value);
+                    }}
+                    minimumTrackTintColor={
+                      colors.accent
+                    }
+                    maximumTrackTintColor={
+                      colors.border
+                    }
+                    thumbImage={sliderThumb}
+                  />
+                </View>
 
                 <View
                   style={styles.speedRangeRow}
