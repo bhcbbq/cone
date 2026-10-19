@@ -232,8 +232,8 @@ def main():
             edges = cv2.Canny(blur, CANNY_LOW, CANNY_HIGH)
             roi_vertices = [
                 (0, height - 1),
-                (int(width * 0.2), int(height * 0.4)),
-                (int(width * 0.8), int(height * 0.4)),
+                (int(width * 0.2), int(height * 0.6)),
+                (int(width * 0.8), int(height * 0.6)),
                 (width - 1, height - 1),
             ]
             cropped_edges = region_of_interest(
