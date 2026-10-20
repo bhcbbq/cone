@@ -1,4 +1,5 @@
 import cv2
+import os
 import time
 import threading
 import numpy as np
@@ -10,9 +11,11 @@ import ugv_control
 BASE_SPEED = 0.3
 FRAME_WIDTH = 640
 
-# 화면을 띄울 때 True
-# SSH에서 화면 없이 실행할 때 False
-SHOW_WINDOWS = True
+# Jetson 로컬 GUI에서는 두 창 표시, SSH에서는 자동으로 창 숨김
+# SSH에서 X11 전달을 사용하더라도 화면 출력하지 않음
+SHOW_WINDOWS = bool(os.environ.get("DISPLAY")) and not bool(
+    os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_CLIENT") or os.environ.get("SSH_TTY")
+)
 
 shared_error = 0.0
 shared_speed = 0.0
@@ -79,10 +82,10 @@ def control_thread_task():
 
 def gstreamer_pipeline(
     sensor_id=0,
-    capture_width=1280,
-    capture_height=720,
-    display_width=640,
-    display_height=360,
+    capture_width=1640,
+    capture_height=1232,
+    display_width=820,
+    display_height=616,
     framerate=30,
     flip_method=0,
 ):
@@ -90,12 +93,13 @@ def gstreamer_pipeline(
         "nvarguscamerasrc sensor-id=%d ! "
         "video/x-raw(memory:NVMM), "
         "width=(int)%d, height=(int)%d, "
-        "framerate=(fraction)%d/1 ! "
+        "format=(string)NV12, framerate=(fraction)%d/1 ! "
         "nvvidconv flip-method=%d ! "
         "video/x-raw, width=(int)%d, height=(int)%d, "
         "format=(string)BGRx ! "
         "videoconvert ! "
-        "video/x-raw, format=(string)BGR ! appsink"
+        "video/x-raw, format=(string)BGR ! "
+        "appsink drop=true max-buffers=1 sync=false"
         % (
             sensor_id,
             capture_width,
