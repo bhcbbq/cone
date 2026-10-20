@@ -16,7 +16,7 @@ FRAME_WIDTH = 640
 # 이 시간 안에 새 영상 결과가 없으면 정지
 FRAME_TIMEOUT = 0.5
 
-# 카메라 프레임을 연속으로 받지 못하면 종료
+# 카메라 프레임 수신 연속 실패 허용 횟수
 MAX_CAMERA_FAILURES = 3
 
 # Jetson 로컬 GUI에서는 화면 표시
@@ -60,8 +60,8 @@ def control_thread_task():
             dt = max(now - last_time, 0.001)
             last_time = now
 
-            # 현재는 거리 적분 결과를 사용하지 않음.
-            # 수신 데이터를 최대 2048바이트까지만 비움.
+            # 현재 주행에서는 거리 적분 결과를 사용하지 않음.
+            # 수신 버퍼를 최대 2048바이트까지만 비움.
             ugv_control.clear_feedback_buffer(ugv_serial)
 
             with error_lock:
@@ -105,6 +105,7 @@ def control_thread_task():
                     previous_error,
                     dt,
                 )
+
                 previous_error = current_error
 
             ugv_control.send_driving_command(
@@ -149,7 +150,7 @@ def control_thread_task():
 
 
 # ==========================================
-# 기존 카메라 설정 유지
+# 카메라 설정
 # ==========================================
 def gstreamer_pipeline(
     sensor_id=0,
@@ -184,7 +185,7 @@ def gstreamer_pipeline(
 
 
 # ==========================================
-# 기존 차선인식 처리 유지
+# 차선인식 처리
 # ==========================================
 def process_lane_frame(frame, tracker, now):
     """검출 모듈의 함수를 호출하여 결과를 받습니다."""
@@ -265,7 +266,6 @@ def main():
 
     cap = None
     control_thread = None
-
     exit_reason = "초기화 중 종료"
 
     window_name = "UGV - ver1 Lane Tracking"
@@ -322,8 +322,11 @@ def main():
             flush=True,
         )
         print(
-            f"[알림] 화면 표시={SHOW_WINDOWS} / "
-            "종료: Ctrl+C, 화면에서는 Q 또는 Esc",
+            f"[알림] 화면 표시={SHOW_WINDOWS}",
+            flush=True,
+        )
+        print(
+            "[알림] 종료: Ctrl+C 또는 영상 창에서 Q / Esc",
             flush=True,
         )
 
@@ -411,7 +414,7 @@ def main():
 
                 shared_frame_time = frame_started
 
-            # SSH에서도 상태를 확인할 수 있도록 1초마다 출력
+            # SSH에서도 확인할 수 있도록 1초마다 상태 출력
             now = time.monotonic()
 
             if now - report_time >= 1.0:
@@ -458,11 +461,13 @@ def main():
                         1,
                     )
 
+                # 원본 카메라 영상 + 차선인식 결과
                 cv2.imshow(
                     window_name,
                     result_image,
                 )
 
+                # 전체 Canny + 차선 검출용 ROI 엣지
                 cv2.imshow(
                     edge_window_name,
                     edge_view,
@@ -480,21 +485,8 @@ def main():
                     )
                     break
 
-                if any(
-                    cv2.getWindowProperty(
-                        name,
-                        cv2.WND_PROP_VISIBLE,
-                    ) < 1
-                    for name in (
-                        window_name,
-                        edge_window_name,
-                    )
-                ):
-                    exit_reason = (
-                        "영상 창 닫힘 또는 "
-                        "창 상태 확인 실패"
-                    )
-                    break
+                # getWindowProperty를 이용한 종료 검사는 제거함.
+                # 종료는 Q / Esc / Ctrl+C 사용.
 
         if control_failure is not None:
             exit_reason = (
@@ -523,11 +515,11 @@ def main():
 
         is_running = False
 
-        # 제어 스레드에서 정지를 먼저 보내고 종료
-        # 이후 메인에서 포트를 닫음
+        # 제어 스레드에서 정지 명령을 먼저 보내고 종료
         if control_thread is not None:
             control_thread.join()
 
+        # 최종 정지 명령 후 시리얼 포트 닫기
         ugv_control.stop_ugv(ugv_serial)
         ugv_serial = None
 
