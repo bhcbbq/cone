@@ -62,7 +62,7 @@ DISTANCE_REPORT_INTERVAL = 0.20
 
 # 외부 검출 모듈을 수정하지 않고 주행 허용 조건을 추가.
 LANE_CONFIRM_FRAMES = 3
-SINGLE_SIDE_MAX_SECONDS = 0.60
+SINGLE_SIDE_MAX_SECONDS = 4.0
 # 화면의 목표 지점 부근에서 측정한 실제 좌우 차선 간격에 맞춰 조정.
 MIN_LANE_WIDTH_RATIO = 0.15
 
