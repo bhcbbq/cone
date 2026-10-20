@@ -153,6 +153,18 @@ const TX_UUID =
   '6E400003-B5A3-F393-E0A9-E50E24DCCA9E';
 
 
+type ManualDirection =
+  | 'forward'
+  | 'forwardLeft'
+  | 'forwardRight'
+  | 'left'
+  | 'right'
+  | 'backward'
+  | 'backwardLeft'
+  | 'backwardRight'
+  | 'stop';
+
+
 
 
 
@@ -472,6 +484,28 @@ export default function HomeScreen() {
 
 
   ] = useState<RobotStatus>('idle');
+
+
+  // =========================
+  // 수동 주행 속도 / 배터리
+  // =========================
+
+  const [driveSpeed, setDriveSpeed] =
+    useState(0.30);
+
+  const [
+    batteryVoltage,
+    setBatteryVoltage,
+  ] = useState<number | undefined>(
+    undefined
+  );
+
+  const [
+    batteryPercent,
+    setBatteryPercent,
+  ] = useState<number | undefined>(
+    undefined
+  );
 
 
 
@@ -959,6 +993,98 @@ export default function HomeScreen() {
 
 
 
+    }
+
+
+    // ---------------------------------
+    // 배터리
+    // BATTERY:12.29
+    // BATTERY:12.29,72
+    // BATTERY_PERCENT:72
+    // ---------------------------------
+
+    if (message.startsWith('BATTERY:')) {
+
+      const payload =
+        message.substring(
+          'BATTERY:'.length
+        );
+
+      const [
+        voltageText,
+        percentText,
+      ] = payload.split(',');
+
+      const voltage =
+        parseFloat(voltageText);
+
+      if (!Number.isNaN(voltage)) {
+        setBatteryVoltage(voltage);
+      }
+
+      if (
+        typeof percentText ===
+        'string'
+      ) {
+        const percent =
+          parseFloat(percentText);
+
+        if (!Number.isNaN(percent)) {
+          setBatteryPercent(
+            Math.max(
+              0,
+              Math.min(
+                100,
+                percent
+              )
+            )
+          );
+        }
+      }
+
+      return;
+    }
+
+
+    if (
+      message.startsWith(
+        'BATTERY_PERCENT:'
+      )
+    ) {
+
+      const percent =
+        parseFloat(
+          message.substring(
+            'BATTERY_PERCENT:'.length
+          )
+        );
+
+      if (!Number.isNaN(percent)) {
+        setBatteryPercent(
+          Math.max(
+            0,
+            Math.min(
+              100,
+              percent
+            )
+          )
+        );
+      }
+
+      return;
+    }
+
+
+    if (
+      message ===
+      'MANUAL_BLOCKED'
+    ) {
+
+      console.log(
+        '자율주행/복귀 중 수동 조작 차단'
+      );
+
+      return;
     }
 
 
@@ -2378,6 +2504,148 @@ export default function HomeScreen() {
 
   };
 
+  // =========================
+  // 수동 주행 속도
+  // =========================
+
+  const changeDriveSpeed = (
+    value: number
+  ) => {
+
+    const safeValue =
+      Math.max(
+        0.20,
+        Math.min(
+          0.50,
+          value
+        )
+      );
+
+    setDriveSpeed(safeValue);
+  };
+
+
+  const applyDriveSpeed = async (
+    value: number
+  ) => {
+
+    // 자율주행/복귀 중에는
+    // 수동 속도 변경 금지
+    if (
+      robotStatus === 'driving' ||
+      robotStatus === 'returning'
+    ) {
+      return;
+    }
+
+    const safeValue =
+      Math.max(
+        0.20,
+        Math.min(
+          0.50,
+          value
+        )
+      );
+
+    setDriveSpeed(safeValue);
+
+    await sendCommand(
+      `SPEED:${safeValue.toFixed(2)}`
+    );
+  };
+
+
+  // =========================
+  // 수동 조작
+  // =========================
+
+  const manualCommandMap: Record<
+    ManualDirection,
+    string
+  > = {
+
+    forward:
+      'FORWARD',
+
+    forwardLeft:
+      'FORWARD_LEFT',
+
+    forwardRight:
+      'FORWARD_RIGHT',
+
+    left:
+      'LEFT',
+
+    right:
+      'RIGHT',
+
+    backward:
+      'BACKWARD',
+
+    backwardLeft:
+      'BACKWARD_LEFT',
+
+    backwardRight:
+      'BACKWARD_RIGHT',
+
+    stop:
+      'STOP',
+  };
+
+
+  const manualPress = async (
+    direction: ManualDirection
+  ) => {
+
+    // 앱에서도 한 번 더 차단
+    if (
+      robotStatus === 'driving' ||
+      robotStatus === 'returning'
+    ) {
+
+      console.log(
+        'MANUAL BLOCKED:',
+        robotStatus
+      );
+
+      return;
+    }
+
+    const command =
+      manualCommandMap[
+      direction
+      ];
+
+    await sendCommand(
+      `MANUAL:${command}`
+    );
+  };
+
+
+  const manualRelease =
+    async () => {
+
+      // 자율주행/복귀 중에는
+      // 수동 STOP도 보내지 않음
+      if (
+        robotStatus ===
+        'driving' ||
+        robotStatus ===
+        'returning'
+      ) {
+        return;
+      }
+
+      // 일반 STOP과 분리
+      // -> 자동주행 pause 상태에
+      //    영향 주지 않음
+      await sendCommand(
+        'MANUAL:STOP'
+      );
+    };
+
+
+
 
 
 
@@ -3314,6 +3582,41 @@ export default function HomeScreen() {
 
 
 
+      }
+
+
+      speed={
+        driveSpeed
+      }
+
+
+      onSpeedChange={
+        changeDriveSpeed
+      }
+
+
+      onSpeedChangeComplete={
+        applyDriveSpeed
+      }
+
+
+      batteryVoltage={
+        batteryVoltage
+      }
+
+
+      batteryPercent={
+        batteryPercent
+      }
+
+
+      onManualPress={
+        manualPress
+      }
+
+
+      onManualRelease={
+        manualRelease
       }
 
 
