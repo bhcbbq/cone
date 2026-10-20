@@ -576,11 +576,7 @@ class LaneTracker:
                             coeff,
                         ])
 
-                    center_y = (
-                        0.94
-                        if ROAD_MODE == "highway"
-                        else 0.85
-                    )
+                    center_y = 0.85
 
                     center_x = float(np.polyval(
                         raw_pair.mean(axis=0),
@@ -711,11 +707,7 @@ def draw_result(frame, pair, status, inferred, top, bottom):
             1,
         )
 
-        target_y = int(h * (
-            0.94
-            if ROAD_MODE == "highway"
-            else 0.85
-        ))
+        target_y = int(h * 0.85)
 
         target_x = float(np.polyval(
             center,
