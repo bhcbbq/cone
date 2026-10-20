@@ -390,38 +390,14 @@ def hc12_thread_task():
                         inner = speed * MANUAL_INNER_RATIO
 
                         manual_map = {
-                            "FORWARD": (
-                                speed,
-                                speed,
-                            ),
-                            "FORWARD_LEFT": (
-                                inner,
-                                speed,
-                            ),
-                            "FORWARD_RIGHT": (
-                                speed,
-                                inner,
-                            ),
-                            "LEFT": (
-                                -speed,
-                                speed,
-                            ),
-                            "RIGHT": (
-                                speed,
-                                -speed,
-                            ),
-                            "BACKWARD": (
-                                -speed,
-                                -speed,
-                            ),
-                            "BACKWARD_LEFT": (
-                                -inner,
-                                -speed,
-                            ),
-                            "BACKWARD_RIGHT": (
-                                -speed,
-                                -inner,
-                            ),
+                            "FORWARD": (speed, speed),
+                            "FORWARD_LEFT": (inner, speed),
+                            "FORWARD_RIGHT": (speed, inner),
+                            "LEFT": (-speed, speed),
+                            "RIGHT": (speed, -speed),
+                            "BACKWARD": (-speed, -speed),
+                            "BACKWARD_LEFT": (-inner, -speed),
+                            "BACKWARD_RIGHT": (-speed, -inner),
                         }
 
                         wheel_speed = manual_map.get(direction)
