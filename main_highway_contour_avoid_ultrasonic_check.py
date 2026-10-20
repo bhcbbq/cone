@@ -38,7 +38,7 @@ AVOID_SPEED = 0.10            # m/s (S자 회피 속도)
 PASS_SPEED = 0.12             # m/s (장애물 측면 직진 통과 속도)
 
 TURN_OUT_TIME_S = 0.45        # 1단계: 대각선 틀기 시간
-ALIGN_TIME_S = 0.45           # 2단계: 차선 평행 정렬 시간
+ALIGN_TIME_S = 0.45           # 2단계: 차선 평행 정렬 시간xx
 TURN_ANGULAR_SPEED = 1.1      # rad/s (회전 각속도)
 
 PASS_DISTANCE_CM = 90.0       # 장애물 통과 직진 거리 (90cm)
