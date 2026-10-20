@@ -186,6 +186,10 @@ export function RobotControlScreen({
     robotStatus === 'driving' ||
     robotStatus === 'returning';
 
+  // 자율주행/복귀 중에는 수동 조작 금지
+  // STOP 버튼은 항상 사용할 수 있게 둡니다.
+  const canManualControl = !isBusy;
+
   const isConnected =
     connectionStatus === 'connected';
 
@@ -232,6 +236,10 @@ export function RobotControlScreen({
   const handleSpeedChange = (
     value: number
   ) => {
+    if (!canManualControl) {
+      return;
+    }
+
     setLocalSpeed(value);
     onSpeedChange?.(value);
   };
@@ -239,6 +247,10 @@ export function RobotControlScreen({
   const handleSpeedChangeComplete = (
     value: number
   ) => {
+    if (!canManualControl) {
+      return;
+    }
+
     setLocalSpeed(value);
     onSpeedChangeComplete?.(value);
   };
@@ -246,10 +258,21 @@ export function RobotControlScreen({
   const handleManualPress = (
     direction: ManualDirection
   ) => {
+    if (
+      direction !== 'stop' &&
+      !canManualControl
+    ) {
+      return;
+    }
+
     onManualPress?.(direction);
   };
 
   const handleManualRelease = () => {
+    if (!canManualControl) {
+      return;
+    }
+
     onManualRelease?.();
   };
 
@@ -771,7 +794,11 @@ export function RobotControlScreen({
                 <View style={styles.speedSliderBox}>
                   <View
                     style={styles.sliderTouchArea}
-                    onTouchStart={() => setIsSliding(true)}
+                    onTouchStart={() => {
+                      if (canManualControl) {
+                        setIsSliding(true);
+                      }
+                    }}
                     onTouchEnd={() => setIsSliding(false)}
                     onTouchCancel={() => setIsSliding(false)}
                   >
@@ -781,6 +808,7 @@ export function RobotControlScreen({
 
                     <Slider
                       style={styles.slider}
+                      disabled={!canManualControl}
                       minimumValue={SPEED_MIN}
                       maximumValue={SPEED_MAX}
                       step={SPEED_STEP}
@@ -826,6 +854,7 @@ export function RobotControlScreen({
                 {/* 1행: ↖ ↑ ↗ */}
                 <View style={styles.directionRow}>
                   <Pressable
+                    disabled={!canManualControl}
                     onPressIn={() =>
                       handleManualPress('forwardLeft')
                     }
@@ -834,6 +863,8 @@ export function RobotControlScreen({
                       styles.directionButton,
                       pressed &&
                       styles.manualPressed,
+                      !canManualControl &&
+                      styles.manualDisabled,
                     ]}
                   >
                     <Ionicons
@@ -850,6 +881,7 @@ export function RobotControlScreen({
                   </Pressable>
 
                   <Pressable
+                    disabled={!canManualControl}
                     onPressIn={() =>
                       handleManualPress('forward')
                     }
@@ -858,6 +890,8 @@ export function RobotControlScreen({
                       styles.directionButton,
                       pressed &&
                       styles.manualPressed,
+                      !canManualControl &&
+                      styles.manualDisabled,
                     ]}
                   >
                     <Ionicons
@@ -868,6 +902,7 @@ export function RobotControlScreen({
                   </Pressable>
 
                   <Pressable
+                    disabled={!canManualControl}
                     onPressIn={() =>
                       handleManualPress('forwardRight')
                     }
@@ -876,6 +911,8 @@ export function RobotControlScreen({
                       styles.directionButton,
                       pressed &&
                       styles.manualPressed,
+                      !canManualControl &&
+                      styles.manualDisabled,
                     ]}
                   >
                     <Ionicons
@@ -895,6 +932,7 @@ export function RobotControlScreen({
                 {/* 2행: ← STOP → */}
                 <View style={styles.directionRow}>
                   <Pressable
+                    disabled={!canManualControl}
                     onPressIn={() =>
                       handleManualPress('left')
                     }
@@ -903,6 +941,8 @@ export function RobotControlScreen({
                       styles.directionButton,
                       pressed &&
                       styles.manualPressed,
+                      !canManualControl &&
+                      styles.manualDisabled,
                     ]}
                   >
                     <Ionicons
@@ -913,9 +953,7 @@ export function RobotControlScreen({
                   </Pressable>
 
                   <Pressable
-                    onPressIn={() =>
-                      handleManualPress('stop')
-                    }
+                    onPress={onStop}
                     style={({ pressed }) => [
                       styles.manualStopButton,
                       pressed &&
@@ -930,6 +968,7 @@ export function RobotControlScreen({
                   </Pressable>
 
                   <Pressable
+                    disabled={!canManualControl}
                     onPressIn={() =>
                       handleManualPress('right')
                     }
@@ -938,6 +977,8 @@ export function RobotControlScreen({
                       styles.directionButton,
                       pressed &&
                       styles.manualPressed,
+                      !canManualControl &&
+                      styles.manualDisabled,
                     ]}
                   >
                     <Ionicons
@@ -951,6 +992,7 @@ export function RobotControlScreen({
                 {/* 3행: ↙ ↓ ↘ */}
                 <View style={styles.directionRow}>
                   <Pressable
+                    disabled={!canManualControl}
                     onPressIn={() =>
                       handleManualPress('backwardLeft')
                     }
@@ -959,6 +1001,8 @@ export function RobotControlScreen({
                       styles.directionButton,
                       pressed &&
                       styles.manualPressed,
+                      !canManualControl &&
+                      styles.manualDisabled,
                     ]}
                   >
                     <Ionicons
@@ -975,6 +1019,7 @@ export function RobotControlScreen({
                   </Pressable>
 
                   <Pressable
+                    disabled={!canManualControl}
                     onPressIn={() =>
                       handleManualPress('backward')
                     }
@@ -983,6 +1028,8 @@ export function RobotControlScreen({
                       styles.directionButton,
                       pressed &&
                       styles.manualPressed,
+                      !canManualControl &&
+                      styles.manualDisabled,
                     ]}
                   >
                     <Ionicons
@@ -993,6 +1040,7 @@ export function RobotControlScreen({
                   </Pressable>
 
                   <Pressable
+                    disabled={!canManualControl}
                     onPressIn={() =>
                       handleManualPress('backwardRight')
                     }
@@ -1001,6 +1049,8 @@ export function RobotControlScreen({
                       styles.directionButton,
                       pressed &&
                       styles.manualPressed,
+                      !canManualControl &&
+                      styles.manualDisabled,
                     ]}
                   >
                     <Ionicons
@@ -1525,6 +1575,10 @@ const styles = StyleSheet.create({
   manualPressed: {
     opacity: 0.72,
     transform: [{ scale: 0.97 }],
+  },
+
+  manualDisabled: {
+    opacity: 0.35,
   },
 
 });
