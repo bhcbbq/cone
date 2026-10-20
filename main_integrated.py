@@ -687,11 +687,19 @@ def ugv_receive_thread_task():
 
                     odr = float(data["odr"])
 
+                    battery = data.get("battery")
+
+                    if battery is not None:
+                        battery = float(battery)
+
                 except Exception as e:
 
                     print("[T2100 오류]", e)
 
                     continue
+
+                if battery is not None:
+                    send_hc12(f"BATTERY:{battery:.2f}")
 
                 with state_lock:
 
