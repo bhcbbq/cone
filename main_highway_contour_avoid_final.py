@@ -33,7 +33,7 @@ FRONT_STOP_CM = 55.0          # 장애물 회피 시작 거리 (55cm)
 OBSTACLE_CLEAR_CM = 60.0      # 비상 정지 해제 판단 거리
 OBSTACLE_CLEAR_HOLD_S = 0.5
 
-NORMAL_SPEED = 0.15           # m/s (일반 차선 추종)
+NORMAL_SPEED = 0.3           # m/s (일반 차선 추종)
 AVOID_SPEED = 0.10            # m/s (S자 회피 속도)
 PASS_SPEED = 0.12             # m/s (장애물 측면 직진 통과 속도)
 
