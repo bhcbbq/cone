@@ -757,12 +757,7 @@ def control_thread_task():
         elif current_mode == "RETURN_TURN":
 
             # 좌우 바퀴를 반대 방향으로 돌려 제자리에서 180도 회전
-            send_raw_ugv(
-                '{"T":1,'
-                f'"L":{-TURN_SPEED},'
-                f'"R":{TURN_SPEED}'
-                '}'
-            )
+            send_raw_ugv('{"T":1,' f'"L":{-TURN_SPEED},' f'"R":{TURN_SPEED}' "}")
 
         # ============================================================
         # RETURN_ALIGN
