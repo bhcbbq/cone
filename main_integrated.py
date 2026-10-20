@@ -320,7 +320,11 @@ def hc12_thread_task():
                             send_hc12("ERROR:INVALID_SPEED")
                             continue
 
-                        if not (MANUAL_SPEED_MIN <= new_speed <= MANUAL_SPEED_MAX):
+                        if not (
+                            MANUAL_SPEED_MIN
+                            <= new_speed
+                            <= MANUAL_SPEED_MAX
+                        ):
                             print("[수동 속도 오류] 범위 초과:", new_speed)
                             send_hc12("ERROR:INVALID_SPEED")
                             continue
@@ -390,14 +394,38 @@ def hc12_thread_task():
                         inner = speed * MANUAL_INNER_RATIO
 
                         manual_map = {
-                            "FORWARD": (speed, speed),
-                            "FORWARD_LEFT": (inner, speed),
-                            "FORWARD_RIGHT": (speed, inner),
-                            "LEFT": (-speed, speed),
-                            "RIGHT": (speed, -speed),
-                            "BACKWARD": (-speed, -speed),
-                            "BACKWARD_LEFT": (-inner, -speed),
-                            "BACKWARD_RIGHT": (-speed, -inner),
+                            "FORWARD": (
+                                speed,
+                                speed,
+                            ),
+                            "FORWARD_LEFT": (
+                                inner,
+                                speed,
+                            ),
+                            "FORWARD_RIGHT": (
+                                speed,
+                                inner,
+                            ),
+                            "LEFT": (
+                                -speed,
+                                speed,
+                            ),
+                            "RIGHT": (
+                                speed,
+                                -speed,
+                            ),
+                            "BACKWARD": (
+                                -speed,
+                                -speed,
+                            ),
+                            "BACKWARD_LEFT": (
+                                -inner,
+                                -speed,
+                            ),
+                            "BACKWARD_RIGHT": (
+                                -speed,
+                                -inner,
+                            ),
                         }
 
                         wheel_speed = manual_map.get(direction)
@@ -663,19 +691,11 @@ def ugv_receive_thread_task():
 
                     odr = float(data["odr"])
 
-                    battery = data.get("battery")
-
-                    if battery is not None:
-                        battery = float(battery)
-
                 except Exception as e:
 
                     print("[T2100 오류]", e)
 
                     continue
-
-                if battery is not None:
-                    send_hc12(f"BATTERY:{battery:.2f}")
 
                 with state_lock:
 
@@ -919,7 +939,7 @@ def control_thread_task():
                 '{"T":1,'
                 f'"L":{current_manual_left:.3f},'
                 f'"R":{current_manual_right:.3f}'
-                "}"
+                '}'
             )
 
         # ============================================================
@@ -929,7 +949,12 @@ def control_thread_task():
         elif current_mode == "RETURN_TURN":
 
             # 좌우 바퀴를 반대 방향으로 돌려 제자리에서 180도 회전
-            send_raw_ugv('{"T":1,' f'"L":{-TURN_SPEED},' f'"R":{TURN_SPEED}' "}")
+            send_raw_ugv(
+                '{"T":1,'
+                f'"L":{-TURN_SPEED},'
+                f'"R":{TURN_SPEED}'
+                '}'
+            )
 
         # ============================================================
         # RETURN_ALIGN
@@ -1300,3 +1325,4 @@ if __name__ == "__main__":
         cv2.destroyAllWindows()
 
         print("[종료] 완료")
+s
