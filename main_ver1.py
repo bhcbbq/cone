@@ -10,16 +10,19 @@ import lane_detection_ver1 as lane_detection
 import ugv_control
 
 
-BASE_SPEED = 0.3
+# ==========================================
+# 기본 설정
+# ==========================================
+BASE_SPEED = 0.15
 FRAME_WIDTH = 640
 
-# 이 시간 안에 새 영상 결과가 없으면 정지
+# 새 영상 결과가 이 시간 이상 갱신되지 않으면 정지
 FRAME_TIMEOUT = 0.5
 
-# 카메라 프레임 수신 연속 실패 허용 횟수
+# 카메라 프레임 연속 수신 실패 허용 횟수
 MAX_CAMERA_FAILURES = 3
 
-# Jetson 로컬 GUI에서는 화면 표시
+# 젯슨 로컬 바탕화면에서는 화면 표시
 # SSH 접속에서는 화면 숨김
 SHOW_WINDOWS = bool(os.environ.get("DISPLAY")) and not bool(
     os.environ.get("SSH_CONNECTION")
@@ -32,6 +35,7 @@ shared_speed = 0.0
 shared_frame_time = None
 
 error_lock = threading.Lock()
+
 is_running = True
 ugv_serial = None
 control_failure = None
@@ -46,23 +50,27 @@ def control_thread_task():
     global control_failure
 
     previous_error = None
-    last_time = time.monotonic()
+    previous_frame_time = None
+
+    angular_z = 0.0
+    frame_dt = None
+
     stale_reported = False
+    last_report = time.monotonic()
 
     print(
-        "[알림] 제어 백그라운드 스레드 시작",
+        "[알림] 제어 스레드 시작: 새 영상마다 PD 계산",
         flush=True,
     )
 
     try:
         while is_running:
-            now = time.monotonic()
-            dt = max(now - last_time, 0.001)
-            last_time = now
+            # 거리 계산 대신 수신 버퍼만 제한적으로 비움
+            ugv_control.clear_feedback_buffer(
+                ugv_serial
+            )
 
-            # 현재 주행에서는 거리 적분 결과를 사용하지 않음.
-            # 수신 버퍼를 최대 2048바이트까지만 비움.
-            ugv_control.clear_feedback_buffer(ugv_serial)
+            now = time.monotonic()
 
             with error_lock:
                 current_error = shared_error
@@ -78,8 +86,10 @@ def control_thread_task():
                 current_speed = 0.0
                 angular_z = 0.0
 
-                # 정지 후 재출발 시 미분항 초기화
+                # 정지 후 재출발 시 D항 정보 초기화
                 previous_error = None
+                previous_frame_time = None
+                frame_dt = None
 
                 if (
                     stale
@@ -96,17 +106,40 @@ def control_thread_task():
             else:
                 stale_reported = False
 
-                # 차선 재인식 직후 미분항 급변 방지
-                if previous_error is None:
-                    previous_error = current_error
-
-                angular_z = ugv_control.calculate_pid(
-                    current_error,
-                    previous_error,
-                    dt,
+                # 새 영상 결과가 들어왔을 때만 PD 계산
+                new_frame = (
+                    previous_frame_time is None
+                    or frame_time != previous_frame_time
                 )
 
-                previous_error = current_error
+                if new_frame:
+                    if previous_frame_time is None:
+                        frame_dt = None
+                    else:
+                        frame_dt = (
+                            frame_time
+                            - previous_frame_time
+                        )
+
+                    # 첫 영상은 previous_error=None이므로
+                    # ugv_control에서 D항을 0으로 처리.
+                    # 이때 1.0은 함수 호출용 값임.
+                    angular_z = (
+                        ugv_control.calculate_pid(
+                            current_error,
+                            previous_error,
+                            (
+                                frame_dt
+                                if frame_dt is not None
+                                else 1.0
+                            ),
+                        )
+                    )
+
+                    previous_error = current_error
+                    previous_frame_time = frame_time
+
+                # 같은 영상 결과라면 직전 조향값 유지
 
             ugv_control.send_driving_command(
                 ugv_serial,
@@ -114,6 +147,25 @@ def control_thread_task():
                 angular_z,
             )
 
+            # 실제 전송 명령을 1초마다 표시
+            if now - last_report >= 1.0:
+                dt_text = (
+                    f"{frame_dt:.3f}s"
+                    if frame_dt is not None
+                    else "초기화"
+                )
+
+                print(
+                    f"[제어] X={current_speed:.2f}, "
+                    f"Z={angular_z:.3f}, "
+                    f"오차={current_error:.1f}px, "
+                    f"영상간격={dt_text}",
+                    flush=True,
+                )
+
+                last_report = now
+
+            # 명령 전송 간격
             time.sleep(0.02)
 
     except Exception as exc:
@@ -122,7 +174,8 @@ def control_thread_task():
         )
 
         print(
-            f"[에러] 제어 스레드 중단: {control_failure}",
+            "[에러] 제어 스레드 중단: "
+            f"{control_failure}",
             flush=True,
         )
         traceback.print_exc()
@@ -141,6 +194,7 @@ def control_thread_task():
                 0.0,
                 0.0,
             )
+
         except Exception as exc:
             print(
                 "[에러] 제어 스레드 정지 명령 "
@@ -165,10 +219,11 @@ def gstreamer_pipeline(
         "nvarguscamerasrc sensor-id=%d ! "
         "video/x-raw(memory:NVMM), "
         "width=(int)%d, height=(int)%d, "
-        "format=(string)NV12, framerate=(fraction)%d/1 ! "
+        "format=(string)NV12, "
+        "framerate=(fraction)%d/1 ! "
         "nvvidconv flip-method=%d ! "
-        "video/x-raw, width=(int)%d, height=(int)%d, "
-        "format=(string)BGRx ! "
+        "video/x-raw, width=(int)%d, "
+        "height=(int)%d, format=(string)BGRx ! "
         "videoconvert ! "
         "video/x-raw, format=(string)BGR ! "
         "appsink drop=true max-buffers=1 sync=false"
@@ -188,7 +243,7 @@ def gstreamer_pipeline(
 # 차선인식 처리
 # ==========================================
 def process_lane_frame(frame, tracker, now):
-    """검출 모듈의 함수를 호출하여 결과를 받습니다."""
+    """차선인식 모듈을 호출하여 결과를 받습니다."""
     target_height = max(
         2,
         round(
@@ -266,6 +321,7 @@ def main():
 
     cap = None
     control_thread = None
+
     exit_reason = "초기화 중 종료"
 
     window_name = "UGV - ver1 Lane Tracking"
@@ -303,7 +359,7 @@ def main():
             )
             return
 
-        # 이전 차선과 차선 폭을 기억하도록 한 번만 생성
+        # 차선과 차선 폭을 기억하도록 한 번만 생성
         tracker = lane_detection.LaneTracker()
 
         if SHOW_WINDOWS:
@@ -322,11 +378,13 @@ def main():
             flush=True,
         )
         print(
-            f"[알림] 화면 표시={SHOW_WINDOWS}",
+            f"[알림] 기본 속도={BASE_SPEED}, "
+            f"화면 표시={SHOW_WINDOWS}",
             flush=True,
         )
         print(
-            "[알림] 종료: Ctrl+C 또는 영상 창에서 Q / Esc",
+            "[알림] 종료: Ctrl+C 또는 "
+            "영상 창에서 Q / Esc",
             flush=True,
         )
 
@@ -340,7 +398,8 @@ def main():
                 )
                 break
 
-            # 영상 읽기와 처리에 걸린 시간까지 포함
+            # 영상 읽기 시작 시각을 기록.
+            # PD 시간 계산과 오래된 영상 판단에 사용.
             frame_started = time.monotonic()
 
             ret, frame = cap.read()
@@ -355,9 +414,7 @@ def main():
                     shared_speed = 0.0
                     shared_frame_time = None
 
-                # 영상 공백 이후 이전 차선을 그대로 재사용하지 않음
                 tracker.reset()
-
                 failure_count += 1
 
                 print(
@@ -414,7 +471,7 @@ def main():
 
                 shared_frame_time = frame_started
 
-            # SSH에서도 확인할 수 있도록 1초마다 상태 출력
+            # SSH에서도 확인할 수 있도록 상태 출력
             now = time.monotonic()
 
             if now - report_time >= 1.0:
@@ -461,7 +518,7 @@ def main():
                         1,
                     )
 
-                # 원본 카메라 영상 + 차선인식 결과
+                # 원본 영상 + 차선인식 결과
                 cv2.imshow(
                     window_name,
                     result_image,
@@ -485,7 +542,7 @@ def main():
                     )
                     break
 
-                # getWindowProperty를 이용한 종료 검사는 제거함.
+                # 창 상태 조회에 의한 종료 검사는 사용하지 않음.
                 # 종료는 Q / Esc / Ctrl+C 사용.
 
         if control_failure is not None:
@@ -515,7 +572,7 @@ def main():
 
         is_running = False
 
-        # 제어 스레드에서 정지 명령을 먼저 보내고 종료
+        # 제어 스레드에서 정지 명령을 먼저 전송
         if control_thread is not None:
             control_thread.join()
 

@@ -43,7 +43,7 @@ def get_edges(frame, return_raw=False):
             (15, 65, 70),
             (40, 255, 255),
         )
-        top = int(h * 0.70)
+        top = int(h * 0.60) #카메라 인식범위
 
     mask = cv2.dilate(
         mask,
@@ -51,7 +51,7 @@ def get_edges(frame, return_raw=False):
     )
 
     edges = cv2.bitwise_and(edges, mask)
-    bottom = int(h * 0.96)
+    bottom = int(h * 0.96) #카메라 인식범위
 
     edges[:top] = 0
     edges[bottom:] = 0
