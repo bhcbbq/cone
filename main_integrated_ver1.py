@@ -1,6 +1,8 @@
 """UGV02 + HC-12 + lane_detection_ver1 통합 실행 파일.
 
-기존 앱 명령과 T2100/T2101/T2102 거리 프로토콜을 유지합니다.
+앱/중계기 수정 없이 기존 명령과 T2100/T2101/T2102를 사용합니다.
+수동 이동은 한 번의 명령으로 최대 2초. 계속하려면 버튼을 다시 누릅니다.
+기존 중계기는 BLE 단절을 알리지 않으므로 즉시 단절 감지는 불가능합니다.
 모터 명령은 제어 스레드 한 곳에서 전송합니다.
 실행: python3 -u main_integrated_ver2.py
 """
@@ -34,9 +36,12 @@ MANUAL_SPEED = 0.30
 MANUAL_SPEED_MIN = 0.20
 MANUAL_SPEED_MAX = 0.50
 MANUAL_INNER_RATIO = 0.50
-# 앱이 누르는 동안 명령을 반복 전송하는지 확인한 뒤에만 시간 제한을 설정.
-# 기존 앱(누를 때 1회, 뗄 때 STOP)과의 호환을 위해 기본값은 None.
-MANUAL_COMMAND_TIMEOUT = None
+# 기존 앱은 누를 때 1회만 전송. 수동 이동의 무제한 지속을 막습니다.
+# 길게 눌러도 2초 후 정지하므로 손을 떼었다 다시 눌러야 계속 이동합니다.
+# 실제 BLE 단절 시점을 감지하는 기능은 아닙니다.
+MANUAL_COMMAND_TIMEOUT = 2.0
+APP_STATUS_INTERVAL = 1.0
+BLE_MESSAGE_MAX_BYTES = 20
 
 TURN_SPEED = 0.25
 ALIGN_TURN_SPEED = 0.18
@@ -111,6 +116,14 @@ class SmartConeController:
         self.closing = False
         self.events = collections.deque(maxlen=128)
         self.distance_message = None
+        self.last_app_report = -math.inf
+        self.app_status = None
+        # STOP 직후 앱이 보낸 TARGET/START/RETURN을 정지 확인 후 처리.
+        self.deferred_target = None
+        self.deferred_action = None
+        self.mission_goal_distance = None
+        # 앱이 재출발 전에 고정한 offset과 실제 정지 거리의 차이.
+        self.display_distance_bias = 0.0
 
         self.mode = "IDLE"
         self.fault = None
@@ -179,6 +192,113 @@ class SmartConeController:
                 self.events.append(message)
         self.tx_wake.set()
 
+    @staticmethod
+    def app_wire_message(message):
+        """중계기의 단일 BLE notify에서 메시지가 잘리지 않도록 제한."""
+        aliases = {
+            "ERROR:NO_FRESH_ODOM": "ERROR:NO_ODOM",
+            "ERROR:INVALID_TARGET": "ERROR:NO_TARGET",
+            "RETURN_ERROR:NO_DISTANCE": "RETURN_ERROR:NO_DIST",
+            "RETURN_ERROR:NO_PAUSED_RETURN": "RETURN_ERROR:PAUSED",
+            "ERROR:FAULT_RESTART_REQUIRED": "ERROR:RESTART",
+            "ERROR:UNKNOWN_COMMAND": "ERROR:UNKNOWN_CMD",
+        }
+        message = aliases.get(message, message)
+        if len(message.encode("ascii")) <= BLE_MESSAGE_MAX_BYTES:
+            return message
+        if message.startswith("MANUAL:"):
+            return "MANUAL:OK"
+        if message.startswith("RETURN_ERROR"):
+            return "RETURN_ERROR"
+        if message.startswith("ERROR:"):
+            return "ERROR:FAULT"
+        # 숫자 메시지가 비정상적으로 길어져도 잘린 숫자를 전송하지 않음.
+        if message.startswith(("DISTANCE:", "TARGET:")):
+            return "ERROR:VALUE_RANGE"
+        return "ERROR:MSG_LENGTH"
+
+    def app_status_messages(self):
+        """앱이 이미 처리하는 짧은 메시지로 현재 상태를 반복 안내."""
+        with self.state_lock:
+            result = ["HC12_CONNECTED"]
+            if self.fault:
+                status = "STOPPED"
+            elif self.mode in RETURN_MODES:
+                status = "RETURNING"
+            elif self.mode == "DRIVE":
+                status = "DRIVING"
+            elif self.paused_return_mode is not None:
+                status = "RETURN_PAUSED"
+            elif self.stop_pending:
+                status = None  # 최종 거리 확정 전 STOPPED를 보내지 않음.
+            else:
+                status = self.app_status
+            if status:
+                result.append(status)
+            return result
+
+    def _clear_deferred(self):
+        self.deferred_target = None
+        self.deferred_action = None
+
+    def _display_segment_distance(self):
+        return max(0.0, self._segment_distance() + self.display_distance_bias)
+
+    def _accept_target(self, requested_distance):
+        """실제 남은 거리와 앱의 이전 구간 offset을 별도로 관리."""
+        distance = requested_distance
+        self.display_distance_bias = 0.0
+        if self.paused_mission and self.mission_goal_distance is not None:
+            # 앱은 '전체 목표 - 화면 이동 거리'를 TARGET으로 전송한다.
+            app_offset = self.mission_goal_distance - requested_distance
+            self.display_distance_bias = self.mission_outbound_total - app_offset
+            distance = max(0.0, self.mission_goal_distance - self.mission_outbound_total)
+        else:
+            self.mission_outbound_total = self.return_drive_distance = 0.0
+            self.mission_goal_distance = requested_distance
+        if distance <= 0:
+            self.pending_target = None
+            self.target_distance = None
+            self.target_armed = False
+            self.app_status = "ARRIVED"
+            self.paused_mission = False
+            self._send_final_distance(requested_distance, "ARRIVED")
+            return
+        self.target_distance = distance
+        self.pending_target = distance
+        self.target_armed = False
+        self.start_odl = self.start_odr = None
+        self.app_status = None
+        self.control_wake.set()
+
+    def _reset_mission(self):
+        # RESET도 이동 정지를 포함. 복귀 중 앱만 초기화되는 상황 방지.
+        self._set_mode("IDLE")
+        self.manual_left_speed = self.manual_right_speed = 0.0
+        self.stop_pending = False
+        self.stop_requested_at = self.stop_sent_at = None
+        self._clear_deferred()
+        self.start_odl = self.start_odr = None
+        self.mission_outbound_total = self.return_drive_distance = 0.0
+        self.mission_goal_distance = None
+        self.display_distance_bias = 0.0
+        self.target_distance = self.pending_target = None
+        self.target_armed = False
+        self.paused_mission = False
+        self.paused_return_mode = None
+        self.return_turn_start_odl = self.return_turn_start_odr = None
+        self.return_drive_start_odl = self.return_drive_start_odr = None
+        self.app_status = None
+        self._reset_vision()
+        with self.tx_lock:
+            # 초기화 전에 큐에 남은 상태/거리로 앱이 다시 바뀌지 않게 함.
+            self.events.clear()
+            self.distance_message = None
+        self.send_hc12("DISTANCE:0.00")
+        # 기존 앱에는 RESET 확인 응답이 없으므로 기존 '목표 없음' 응답으로
+        # idle을 확정. 초기화 뒤에는 실제로 목표가 없는 상태입니다.
+        self.send_hc12("ERROR:NO_TARGET")
+
     def _send_final_distance(self, distance, status):
         # 앱이 최종 거리 다음에 STOPPED/ARRIVED를 받도록 순서를 보장.
         with self.tx_lock:
@@ -219,9 +339,12 @@ class SmartConeController:
             self.mode = "IDLE"
             self.manual_left_speed = self.manual_right_speed = 0.0
             self.pending_target = None
+            self._clear_deferred()
+            self.app_status = "STOPPED"
             self._reset_pd()
             print(f"[정지 오류] {reason} / 원인 해결 후 프로그램을 다시 실행하세요.", flush=True)
             self.send_hc12(f"ERROR:{reason}")
+            self.send_hc12("STOPPED")
         self.control_wake.set()
 
     def _odom_fresh(self, now):
@@ -252,10 +375,13 @@ class SmartConeController:
             self.send_hc12("ERROR:STOP_PENDING")
             return False
         if automatic and not self._odom_fresh(now):
-            self.send_hc12("RETURN_ERROR:NO_ODOM" if returning else "ERROR:NO_FRESH_ODOM")
+            self.app_status = "RETURN_ERROR:NO_ODOM" if returning else "ERROR:NO_ODOM"
+            self.send_hc12("RETURN_ERROR:NO_ODOM" if returning else "ERROR:NO_ODOM")
             return False
         if automatic and not self._camera_fresh(now):
+            self.app_status = "STOPPED"
             self.send_hc12("CAMERA_ERROR")
+            self.send_hc12("STOPPED")
             return False
         return True
 
@@ -287,24 +413,37 @@ class SmartConeController:
                 self.paused_mission = False
                 self.start_odl = self.start_odr = None
                 self.mission_outbound_total = self.return_drive_distance = 0.0
+                self.mission_goal_distance = None
+                self.display_distance_bias = 0.0
+                self._clear_deferred()
+                self.app_status = "STOPPED"
                 self._reset_vision()
                 self.send_hc12("EMERGENCY")
                 return
 
             if cmd == "STOP":
+                self._clear_deferred()
+                self.pending_target = None
+                self.target_armed = False
+                with self.tx_lock:
+                    self.distance_message = None
                 old_mode = self.mode
                 if old_mode in RETURN_MODES:
                     self.paused_return_mode = old_mode
+                    self.app_status = "RETURN_PAUSED"
                     self.send_hc12("RETURN_PAUSED")
                 elif old_mode == "DRIVE":
                     self.stop_pending = True
                     self.stop_requested_at = now
                     self.stop_sent_at = None
                     self.paused_mission = True
+                    self.app_status = "STOPPED"
                 elif old_mode == "MANUAL":
                     self.send_hc12("MANUAL_STOPPED")
+                    self.app_status = None
                 elif not self.stop_pending:
-                    self.send_hc12("STOPPED")
+                    self.app_status = "RETURN_PAUSED" if self.paused_return_mode else "STOPPED"
+                    self.send_hc12(self.app_status)
                 self.manual_left_speed = self.manual_right_speed = 0.0
                 self.align_stable_count = 0
                 self._set_mode("IDLE")
@@ -350,6 +489,7 @@ class SmartConeController:
                 self._release_emergency()
                 self.manual_left_speed, self.manual_right_speed = manual_map[direction]
                 self.manual_received_at = now
+                self.app_status = None
                 self._set_mode("MANUAL")
                 self.send_hc12(f"MANUAL:{direction}")
                 return
@@ -362,23 +502,31 @@ class SmartConeController:
                 if not math.isfinite(distance) or distance <= 0:
                     self.send_hc12("ERROR:INVALID_TARGET")
                     return
-                if self.mode != "IDLE" or self.stop_pending or self.paused_return_mode is not None:
+                if self.stop_pending:
+                    self.deferred_target = distance
+                    print(f"[대기] 정지 거리 확정 후 TARGET:{distance} 처리", flush=True)
+                    return
+                if self.mode != "IDLE" or self.paused_return_mode is not None:
                     self.send_hc12("ERROR:BUSY")
                     return
-                if not self.paused_mission:
-                    self.mission_outbound_total = self.return_drive_distance = 0.0
-                self.target_distance = distance
-                self.pending_target = distance
-                self.target_armed = False
-                self.start_odl = self.start_odr = None
-                self.control_wake.set()
+                self._accept_target(distance)
                 return
 
             if cmd == "START":
+                if self.stop_pending:
+                    self.deferred_action = "START"
+                    return
+                if self.app_status == "ARRIVED" and self.target_distance is None:
+                    self.send_hc12("ARRIVED")
+                    return
                 if self.mode != "IDLE" or self.paused_return_mode is not None:
                     self.send_hc12("ERROR:BUSY")
                     return
                 if not self._motion_allowed(now, automatic=True):
+                    return
+                if self.pending_target is None and not self.target_armed:
+                    self.app_status = "ERROR:NO_TARGET"
+                    self.send_hc12("ERROR:NO_TARGET")
                     return
                 self._release_emergency()
                 # TARGET 처리 직후 하위보드가 카운터를 재설정하는 경우도 고려.
@@ -387,10 +535,14 @@ class SmartConeController:
                 self.outbound_baseline_after = max(now, self.target_ready_at or now)
                 self._reset_vision()
                 self._set_mode("DRIVE")
+                self.app_status = "DRIVING"
                 self.send_hc12("DRIVING")
                 return
 
             if cmd == "RETURN":
+                if self.stop_pending:
+                    self.deferred_action = "RETURN"
+                    return
                 if self.mode != "IDLE" or self.paused_return_mode is not None:
                     self.send_hc12("ERROR:BUSY")
                     return
@@ -407,6 +559,7 @@ class SmartConeController:
                 self.pending_target = None
                 self._reset_vision()
                 self._set_mode("RETURN_TURN")
+                self.app_status = "RETURNING"
                 self.send_hc12("RETURNING")
                 return
 
@@ -422,23 +575,13 @@ class SmartConeController:
                 self.stage_started_at = now
                 self._reset_vision()
                 self._set_mode(resume_mode)
+                self.app_status = "RETURNING"
                 self.send_hc12("RETURNING")
                 return
 
             if cmd == "RESET_DISTANCE":
-                if self.mode != "IDLE" or self.stop_pending:
-                    self.send_hc12("ERROR:BUSY")
-                    return
-                self.start_odl = self.start_odr = None
-                self.mission_outbound_total = self.return_drive_distance = 0.0
-                self.target_distance = self.pending_target = None
-                self.target_armed = False
-                self.paused_mission = False
-                self.paused_return_mode = None
-                self.return_turn_start_odl = self.return_turn_start_odr = None
-                self.return_drive_start_odl = self.return_drive_start_odr = None
-                self._reset_vision()
-                self.send_hc12("DISTANCE:0.00")
+                self._reset_mission()
+                print("[RESET] 이동 정지 및 임무/거리 초기화", flush=True)
                 return
             self.send_hc12("ERROR:UNKNOWN_COMMAND")
 
@@ -467,16 +610,32 @@ class SmartConeController:
                         and now >= self.outbound_baseline_after):
                     self.start_odl, self.start_odr = odl, odr
                 if self.mode == "DRIVE" and now - self.last_distance_report >= DISTANCE_REPORT_INTERVAL:
-                    self.send_hc12(f"DISTANCE:{self._segment_distance():.2f}")
+                    self.send_hc12(f"DISTANCE:{self._display_segment_distance():.2f}")
                     self.last_distance_report = now
                 if (self.mode == "IDLE" and self.stop_pending and self.stop_sent_at is not None
                         and now >= self.stop_sent_at + STOP_SETTLE_SECONDS):
                     distance = self._segment_distance()
+                    display_distance = self._display_segment_distance()
                     self.mission_outbound_total += distance
                     self.return_drive_distance = self.mission_outbound_total
                     self.stop_pending = False
                     self.start_odl = self.start_odr = None
-                    self._send_final_distance(distance, "STOPPED")
+                    requested = self.deferred_target
+                    action = self.deferred_action
+                    self._clear_deferred()
+                    if requested is None:
+                        self._send_final_distance(display_distance, "STOPPED")
+                    else:
+                        # 이전 구간 최종 거리를 새 앱 offset에 또 더하지 않음.
+                        with self.tx_lock:
+                            self.distance_message = None
+                        self._accept_target(requested)
+                    if action is not None:
+                        if action == "RETURN":
+                            # TARGET/RETURN이 함께 들어와도 복귀에 잔류 목표를 넘기지 않음.
+                            self.pending_target = None
+                            self.target_armed = False
+                        self.handle_command(action)
                     print(f"[STOP] 구간={distance:.2f}m / 누적={self.return_drive_distance:.2f}m", flush=True)
 
             elif data.get("T") == 2102:
@@ -496,7 +655,8 @@ class SmartConeController:
                 self.return_drive_distance = self.mission_outbound_total
                 self.paused_mission = False
                 self.start_odl = self.start_odr = None
-                self._send_final_distance(distance, "ARRIVED")
+                self.app_status = "ARRIVED"
+                self._send_final_distance(max(0.0, distance + self.display_distance_bias), "ARRIVED")
                 print(f"[도착] 정지. RETURN 명령 대기 / 복귀거리={self.return_drive_distance:.2f}m", flush=True)
 
     def publish_vision(self, error, detected, status, inferred, pair, shape, frame_time, epoch):
@@ -612,8 +772,10 @@ class SmartConeController:
                 if (MANUAL_COMMAND_TIMEOUT is not None
                         and now - self.manual_received_at > MANUAL_COMMAND_TIMEOUT):
                     self._set_mode("IDLE")
+                    self.manual_left_speed = self.manual_right_speed = 0.0
                     self._write_drive(0.0, 0.0)
                     self.send_hc12("MANUAL_STOPPED")
+                    print("[수동 정지] 2초 제한. 버튼을 떼었다 다시 누르세요.", flush=True)
                 else:
                     self._write_raw({"T": 1, "L": self.manual_left_speed, "R": self.manual_right_speed})
                 return
@@ -696,6 +858,9 @@ class SmartConeController:
                         self.paused_mission = False
                         self.paused_return_mode = None
                         self.mission_outbound_total = self.return_drive_distance = 0.0
+                        self.mission_goal_distance = None
+                        self.display_distance_bias = 0.0
+                        self.app_status = "RETURNED"
                         self.send_hc12("RETURNED")
                         print("[RETURN] 복귀 완료", flush=True)
                         return
@@ -757,6 +922,11 @@ class SmartConeController:
     def hc12_tx_thread_task(self):
         try:
             while self.running.is_set():
+                now = self.clock()
+                if now - self.last_app_report >= APP_STATUS_INTERVAL:
+                    self.last_app_report = now
+                    for status in self.app_status_messages():
+                        self.send_hc12(status)
                 with self.tx_lock:
                     if self.events:
                         message = self.events.popleft()
@@ -766,7 +936,10 @@ class SmartConeController:
                     self.tx_wake.wait(0.05)
                     self.tx_wake.clear()
                     continue
-                data = (message + "\n").encode("utf-8")
+                wire_message = self.app_wire_message(message)
+                if wire_message != message:
+                    print(f"[HC12 TX] {message} -> {wire_message}", flush=True)
+                data = (wire_message + "\n").encode("ascii")
                 if self.hc12_serial.write(data) != len(data):
                     raise IOError("HC12 명령 일부 전송")
         except Exception:
