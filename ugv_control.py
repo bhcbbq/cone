@@ -92,8 +92,8 @@ def calculate_pid(
     current_error,
     previous_error,
     dt,
-    Kp=0.005,
-    Kd=0.005,
+    Kp=0.007,
+    Kd=0.002,
 ):
     """
     차선 오차로 조향 각속도를 계산하는 PD 제어입니다.
