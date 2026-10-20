@@ -1,5 +1,5 @@
 # main_highway_contour_avoid.py
-# UGV02 Lane Following + Edge/Contour Obstacle Avoidance (Color-Independent Highway Version)
+# UGV02 Highway Edge/Contour Avoidance + SSH Terminal Diagnostic Logging
 
 import cv2
 import time
@@ -7,6 +7,7 @@ import threading
 import traceback
 import math
 import numpy as np
+import os
 from enum import Enum, auto
 
 import lane_detection
@@ -28,8 +29,7 @@ CAMERA_FPS = 30
 
 LANE_WIDTH_CM = 70.0
 
-# 감지 거리 확장: 55cm (크게 꺾으므로 멀리서 미리 회피 시작)
-FRONT_STOP_CM = 55.0          
+FRONT_STOP_CM = 55.0          # 장애물 회피 시작 거리 (55cm)
 OBSTACLE_CLEAR_CM = 60.0      # 비상 정지 해제 판단 거리
 OBSTACLE_CLEAR_HOLD_S = 0.5
 
@@ -37,21 +37,21 @@ NORMAL_SPEED = 0.15           # m/s (일반 차선 추종)
 AVOID_SPEED = 0.10            # m/s (S자 회피 속도)
 PASS_SPEED = 0.12             # m/s (장애물 측면 직진 통과 속도)
 
-# 대각선 이동 및 정렬 시간 확장 (측면 이동 거리 약 30cm 이상 확보)
 TURN_OUT_TIME_S = 0.45        # 1단계: 대각선 틀기 시간
 ALIGN_TIME_S = 0.45           # 2단계: 차선 평행 정렬 시간
-TURN_ANGULAR_SPEED = 1.1      # rad/s (과적 마찰 극복 각속도)
+TURN_ANGULAR_SPEED = 1.1      # rad/s (회전 각속도)
 
-# 통과 거리 확장 (90cm)
-PASS_DISTANCE_CM = 90.0       
+PASS_DISTANCE_CM = 90.0       # 장애물 통과 직진 거리 (90cm)
 PASS_TIMEOUT_S = PASS_DISTANCE_CM / (PASS_SPEED * 100.0)
-RECOVERY_TIMEOUT_S = 6.0      # 복귀 타임아웃 확장
+RECOVERY_TIMEOUT_S = 6.0      
 
 CONTROL_PERIOD_S = 0.02
 CAMERA_PERIOD_S = 0.03
 NO_OBSTACLE = -1.0
 
-# CSI camera GStreamer pipeline
+# SSH 환경 터미널 전용 로그 출력 간격 (초)
+TERMINAL_LOG_INTERVAL_S = 1.0
+
 GST_PIPELINE = (
     "nvarguscamerasrc ! "
     "video/x-raw(memory:NVMM), width=1280, height=720, "
@@ -111,7 +111,7 @@ def transition(new_state):
     global state, state_enter_time
     state = new_state
     state_enter_time = time.monotonic()
-    print(f"[FSM] -> {state.name}")
+    print(f"\n[FSM STATE TRANSITION] -> {state.name}")
 
 
 def state_elapsed():
@@ -130,10 +130,6 @@ def open_camera():
 # ============================================================
 
 def detect_hough_lines(frame):
-    """
-    [Canny Edge 기반 차선 추종]
-    도로/차선 색상에 의존하지 않고 명암 차이(Edge)로 차선 선분을 추출합니다.
-    """
     height, width = frame.shape[:2]
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
@@ -201,11 +197,6 @@ def estimate_lane_boundaries(lines, image_width, image_height):
 
 
 def get_obstacle_direction_by_contour(frame, lines):
-    """
-    [Otsu 이진화 + 윤곽선(Contour) 기반 장애물 방향 추출]
-    특정 HSV 색상을 고정하지 않고, 차선 내부 영역의 적응형 명암 차이로
-    독립된 덩어리(Contour)를 감지하여 장애물 반대 방향을 구합니다.
-    """
     height, width = frame.shape[:2]
     x_left, x_right = estimate_lane_boundaries(lines, width, height)
 
@@ -214,7 +205,7 @@ def get_obstacle_direction_by_contour(frame, lines):
 
     lane_center = (x_left + x_right) / 2.0
     lane_px = x_right - x_left
-    margin_px = int(lane_px * 0.10)  # 차선 선분 오인식 방지를 위한 10% 안쪽 마진
+    margin_px = int(lane_px * 0.10)
 
     y1, y2 = int(height * 0.52), int(height * 0.84)
     x1 = max(0, int(x_left + margin_px))
@@ -227,15 +218,12 @@ def get_obstacle_direction_by_contour(frame, lines):
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
 
-    # Otsu 자동 이진화: 바닥 배경과 명암 차이를 보이는 입체 덩어리 자동 분리
     _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-    # 모폴로지 연산으로 가벼운 잔여 노이즈 제거
     kernel = np.ones((5, 5), np.uint8)
     thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
     thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
 
-    # 윤곽선(Contour) 추출
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     min_area = max(40, int((x2 - x1) * (y2 - y1) * 0.01))
     valid_contours = [c for c in contours if cv2.contourArea(c) >= min_area]
@@ -245,7 +233,6 @@ def get_obstacle_direction_by_contour(frame, lines):
         bx, by, bw, bh = cv2.boundingRect(largest_contour)
         obs_center = x1 + bx + (bw / 2.0)
 
-        # 장애물 위치가 차선 중앙 기준 우측이면 LEFT, 좌측이면 RIGHT
         if obs_center >= lane_center:
             return AvoidDirection.LEFT
         else:
@@ -261,7 +248,7 @@ def get_obstacle_direction_by_contour(frame, lines):
 def create_ultrasonic_reader():
     reader = UltrasonicReader(port=ULTRASONIC_PORT, baudrate=SERIAL_BAUD)
     if not reader.start():
-        raise RuntimeError("아두이노 초음파 센서 연결 실패")
+        raise RuntimeError("아두이노 초음파 센서 시리얼 연결 실패")
     return reader
 
 
@@ -333,9 +320,8 @@ def run_fsm(error, is_detected, frame, lines, left_d, front_d, right_d):
     # [1] 일반 차선 추종
     if state == State.LANE_FOLLOWING:
         if front_obstacle_detected(front_d):
-            # Canny + Contour 기반 윤곽선 분석으로 회피 방향 결정
             avoid_direction = get_obstacle_direction_by_contour(frame, lines)
-            print(f"[CONTOUR AVOID START] Contour Filter -> Avoid {avoid_direction.name}")
+            print(f"\n[OBSTACLE DETECTED] Ultrasonic Front: {front_d:.1f}cm -> Avoid Dir: {avoid_direction.name}")
             transition(State.AVOID_TURN_OUT)
         elif not is_detected:
             force_stop()
@@ -343,21 +329,21 @@ def run_fsm(error, is_detected, frame, lines, left_d, front_d, right_d):
             set_command(NORMAL_SPEED, None, error=error)
         return
 
-    # [2] 넓은 S자 회피 1단계: 대각선 틀기 (0.45초 동안 크게 이동)
+    # [2] S자 회피 1단계: 대각선 틀기
     if state == State.AVOID_TURN_OUT:
         set_command(AVOID_SPEED, avoid_direction.value * TURN_ANGULAR_SPEED)
         if state_elapsed() >= TURN_OUT_TIME_S:
             transition(State.AVOID_ALIGN)
         return
 
-    # [3] 넓은 S자 회피 2단계: 차선 평행 정렬 (0.45초)
+    # [3] S자 회피 2단계: 차선 평행 정렬
     if state == State.AVOID_ALIGN:
         set_command(AVOID_SPEED, -avoid_direction.value * TURN_ANGULAR_SPEED)
         if state_elapsed() >= ALIGN_TIME_S:
             transition(State.AVOID_FORWARD)
         return
 
-    # [4] 회피 3단계: 여유 공간 직진 통과 (90cm)
+    # [4] 회피 3단계: 장애물 측면 직진 통과
     if state == State.AVOID_FORWARD:
         set_command(PASS_SPEED, 0.0)
         if state_elapsed() >= PASS_TIMEOUT_S:
@@ -415,15 +401,46 @@ def main():
     control_thread = None
 
     try:
-        ugv_serial = ugv_control.init_ugv(port=UGV_PORT, baudrate=SERIAL_BAUD)
-        ultrasonic = create_ultrasonic_reader()
-        camera = open_camera()
+        print("==================================================")
+        print("[SYSTEM INIT] UGV02 Autonomous System Starting...")
+        print("==================================================")
 
+        # 1. UGV02 시리얼 초기화
+        ugv_serial = ugv_control.init_ugv(port=UGV_PORT, baudrate=SERIAL_BAUD)
+        print("[INIT OK] UGV02 Serial Connected.")
+
+        # 2. 초음파 센서 초기화 및 수신 테스트 (SSH 수신 진단)
+        print("[INIT] Connecting Ultrasonic Arduino...")
+        ultrasonic = create_ultrasonic_reader()
+        time.sleep(0.5)
+
+        # [진단 로직 1] 초기 초음파 데이터 수신 확인
+        test_left, test_front, test_right = read_distances(ultrasonic)
+        print(f"[ULTRASONIC DIAGNOSTIC OK] Arduino -> Jetson Data Received!")
+        print(f" -> Initial Distance: Left={test_left:.1f}cm | Front={test_front:.1f}cm | Right={test_right:.1f}cm\n")
+
+        # 3. 카메라 초기화
+        print("[INIT] Opening CSI Camera...")
+        camera = open_camera()
+        print("[INIT OK] Camera Opened.")
+
+        # 4. 제어 백그라운드 스레드 시작
         control_thread = threading.Thread(
             target=control_thread_task, args=(ugv_serial,), daemon=True
         )
         control_thread.start()
         force_stop()
+
+        # GUI 디스플레이 세팅 유무 확인
+        has_display = bool(os.environ.get("DISPLAY", None))
+        if not has_display:
+            print("[INFO] Headless Mode Detected (SSH execution without GUI display).")
+
+        print("--------------------------------------------------")
+        print("[RUNNING] Autonomous driving active. Press Ctrl+C in terminal to stop.")
+        print("--------------------------------------------------\n")
+
+        last_terminal_log_time = time.monotonic()
 
         while not shutdown_event.is_set():
             ret, frame = camera.read()
@@ -438,24 +455,40 @@ def main():
             )
             left_d, front_d, right_d = read_distances(ultrasonic)
 
+            # FSM 주행 상태 제어
             run_fsm(error, is_detected, frame, lines, left_d, front_d, right_d)
 
-            cv2.putText(
-                annotated, f"STATE: {state.name}", (10, 25),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2
-            )
-            cv2.putText(
-                annotated, f"Avoid Dir: {avoid_direction.name}", (10, 50),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 0), 1
-            )
-            cv2.imshow("UGV02 Edge/Contour Avoidance", annotated)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
+            # [진단 로직 2] SSH 터미널로 실시간 초음파 데이터 주기적 출력 (1초 간격)
+            now = time.monotonic()
+            if now - last_terminal_log_time >= TERMINAL_LOG_INTERVAL_S:
+                print(
+                    f"[SSH MONITOR] State: {state.name:<15} | "
+                    f"US Distances (L/F/R): {left_d:5.1f} / {front_d:5.1f} / {right_d:5.1f} cm | "
+                    f"Lane Error: {error:+.2f}"
+                )
+                last_terminal_log_time = now
+
+            # SSH 환경에서 DISPLAY가 있을 때만 OpenCV 화면 표시
+            if has_display:
+                cv2.putText(
+                    annotated, f"STATE: {state.name}", (10, 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2
+                )
+                cv2.putText(
+                    annotated, f"US L/F/R: {left_d:.1f}/{front_d:.1f}/{right_d:.1f} cm", (10, 50),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 0), 1
+                )
+                cv2.imshow("UGV02 Edge/Contour Avoidance", annotated)
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
 
             time.sleep(CAMERA_PERIOD_S)
 
     except KeyboardInterrupt:
-        pass
+        print("\n[STOP] Keyboard Interrupt detected via SSH.")
+    except Exception as exc:
+        print(f"\n[ERROR] Exception occurred: {exc!r}")
+        traceback.print_exc()
     finally:
         shutdown_event.set()
         force_stop()
@@ -468,6 +501,7 @@ def main():
         if camera is not None:
             camera.release()
         cv2.destroyAllWindows()
+        print("[EXIT] Autonomous driving system safely shutdown.")
 
 
 if __name__ == "__main__":

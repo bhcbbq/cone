@@ -1,6 +1,6 @@
 # main_highway_wide_avoid.py
 # UGV02 Lane Following + Multi-Color Obstacle Avoidance (Highway Wide Avoidance Version)
-
+## 검은색 도로, 흰색 차선.
 import cv2
 import time
 import threading
