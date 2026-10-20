@@ -14,6 +14,15 @@ import ugv_control
 
 BASE_SPEED = 0.30
 
+# 수동 주행 전용 속도
+# 앱 수동 페이지의 슬라이더(SPEED:0.20 ~ 0.50)로 변경
+MANUAL_SPEED = 0.30
+MANUAL_SPEED_MIN = 0.20
+MANUAL_SPEED_MAX = 0.50
+
+# 대각선 주행 시 안쪽 바퀴 속도 비율
+MANUAL_INNER_RATIO = 0.50
+
 # 복귀 제자리 180도 회전 속도
 TURN_SPEED = 0.25
 
@@ -51,6 +60,10 @@ is_running = True
 
 shared_error = 0.0
 lane_detected = False
+
+# 수동 주행 시 좌/우 바퀴에 보낼 속도
+manual_left_speed = 0.0
+manual_right_speed = 0.0
 
 state_lock = threading.Lock()
 ugv_write_lock = threading.Lock()
@@ -172,6 +185,9 @@ def stop_ugv_now():
 def hc12_thread_task():
 
     global mode
+    global MANUAL_SPEED
+    global manual_left_speed
+    global manual_right_speed
 
     global start_odl
     global start_odr
@@ -260,6 +276,15 @@ def hc12_thread_task():
                                 paused_return_mode = mode
                                 stop_pending = False
                                 was_returning = True
+
+                            # 수동조작 중 STOP은 자동주행 거리/재개 상태에 섞지 않음
+                            elif mode == "MANUAL":
+                                paused_return_mode = None
+                                stop_pending = False
+                                was_returning = False
+                                manual_left_speed = 0.0
+                                manual_right_speed = 0.0
+
                             else:
                                 paused_return_mode = None
                                 stop_pending = True
@@ -277,6 +302,152 @@ def hc12_thread_task():
                         else:
                             print("[정지] UGV STOP")
                             print("[정지] 최종 엔코더 거리 대기")
+
+                        continue
+
+                    # ==================================================
+                    # SPEED - 수동주행 속도 설정
+                    # 예: SPEED:0.30
+                    # ==================================================
+
+                    if cmd.startswith("SPEED:"):
+
+                        try:
+                            new_speed = float(cmd.split(":", 1)[1])
+
+                        except ValueError:
+                            print("[수동 속도 오류]", cmd)
+                            send_hc12("ERROR:INVALID_SPEED")
+                            continue
+
+                        if not (MANUAL_SPEED_MIN <= new_speed <= MANUAL_SPEED_MAX):
+                            print("[수동 속도 오류] 범위 초과:", new_speed)
+                            send_hc12("ERROR:INVALID_SPEED")
+                            continue
+
+                        with state_lock:
+                            current_mode = mode
+
+                            # 자율주행/복귀 중에는 속도 변경 차단
+                            if current_mode in (
+                                "DRIVE",
+                                "RETURN_TURN",
+                                "RETURN_ALIGN",
+                                "RETURN_DRIVE",
+                            ):
+                                speed_blocked = True
+                            else:
+                                speed_blocked = False
+                                MANUAL_SPEED = new_speed
+
+                        if speed_blocked:
+                            send_hc12("MANUAL_BLOCKED")
+                            print("[수동 속도] 자율주행/복귀 중 변경 차단")
+                        else:
+                            send_hc12(f"SPEED:{MANUAL_SPEED:.2f}")
+                            print("[수동 속도]", f"{MANUAL_SPEED:.2f}")
+
+                        continue
+
+                    # ==================================================
+                    # MANUAL - 수동 8방향 주행
+                    # ==================================================
+
+                    if cmd.startswith("MANUAL:"):
+
+                        direction = cmd.split(":", 1)[1].strip().upper()
+
+                        with state_lock:
+                            current_mode = mode
+
+                        # 자동주행/복귀 중에는 수동조작 금지
+                        if current_mode in (
+                            "DRIVE",
+                            "RETURN_TURN",
+                            "RETURN_ALIGN",
+                            "RETURN_DRIVE",
+                        ):
+                            send_hc12("MANUAL_BLOCKED")
+                            print("[수동] 자율주행/복귀 중 명령 차단:", direction)
+                            continue
+
+                        # 방향 버튼에서 손을 뗐을 때
+                        if direction == "STOP":
+
+                            with state_lock:
+                                manual_left_speed = 0.0
+                                manual_right_speed = 0.0
+
+                                if mode == "MANUAL":
+                                    mode = "IDLE"
+
+                            stop_ugv_now()
+                            send_hc12("MANUAL_STOPPED")
+                            print("[수동] STOP")
+                            continue
+
+                        speed = MANUAL_SPEED
+                        inner = speed * MANUAL_INNER_RATIO
+
+                        manual_map = {
+                            "FORWARD": (
+                                speed,
+                                speed,
+                            ),
+                            "FORWARD_LEFT": (
+                                inner,
+                                speed,
+                            ),
+                            "FORWARD_RIGHT": (
+                                speed,
+                                inner,
+                            ),
+                            "LEFT": (
+                                -speed,
+                                speed,
+                            ),
+                            "RIGHT": (
+                                speed,
+                                -speed,
+                            ),
+                            "BACKWARD": (
+                                -speed,
+                                -speed,
+                            ),
+                            "BACKWARD_LEFT": (
+                                -inner,
+                                -speed,
+                            ),
+                            "BACKWARD_RIGHT": (
+                                -speed,
+                                -inner,
+                            ),
+                        }
+
+                        wheel_speed = manual_map.get(direction)
+
+                        if wheel_speed is None:
+                            print("[수동 방향 오류]", direction)
+                            send_hc12("ERROR:INVALID_MANUAL")
+                            continue
+
+                        left_speed, right_speed = wheel_speed
+
+                        with state_lock:
+                            manual_left_speed = left_speed
+                            manual_right_speed = right_speed
+                            mode = "MANUAL"
+
+                        send_hc12(f"MANUAL:{direction}")
+
+                        print(
+                            "[수동]",
+                            direction,
+                            "L=",
+                            f"{left_speed:.2f}",
+                            "R=",
+                            f"{right_speed:.2f}",
+                        )
 
                         continue
 
@@ -734,6 +905,9 @@ def control_thread_task():
 
             detected = lane_detected
 
+            current_manual_left = manual_left_speed
+            current_manual_right = manual_right_speed
+
         if current_mode != last_mode:
 
             previous_error = current_error
@@ -749,6 +923,20 @@ def control_thread_task():
             with ugv_write_lock:
 
                 ugv_control.send_driving_command(ugv_serial, 0.0, 0.0)
+
+        # ============================================================
+        # MANUAL
+        # 카메라/PID 없이 좌/우 바퀴 직접 제어
+        # ============================================================
+
+        elif current_mode == "MANUAL":
+
+            send_raw_ugv(
+                '{"T":1,'
+                f'"L":{current_manual_left:.3f},'
+                f'"R":{current_manual_right:.3f}'
+                "}"
+            )
 
         # ============================================================
         # RETURN_TURN
