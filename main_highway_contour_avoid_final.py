@@ -26,9 +26,9 @@ FRAME_WIDTH = 640
 FRAME_TIMEOUT = 0.5
 MAX_CAMERA_FAILURES = 3
 
-BASE_SPEED = 0.15             # m/s (일반 차선 추종)
-AVOID_SPEED = 0.10            # m/s (기본 회피 보조 속도)
-PASS_SPEED = 0.12             # m/s (대각선 전진 및 직진 통과 속도)
+BASE_SPEED = 0.30             # m/s (일반 차선 추종)
+AVOID_SPEED = 0.15            # m/s (기본 회피 보조 속도)
+PASS_SPEED = 0.20             # m/s (대각선 전진 및 직진 통과 속도)
 
 # [장애물 회피 파라미터]
 FRONT_STOP_CM = 45.0          # 회피 시작 기준 거리
@@ -41,7 +41,7 @@ DIAGONAL_TIME_S = 1.0
 ALIGN_TIME_S = 0.45           
 
 TURN_ANGULAR_SPEED = 1.8      # 무거운 차체 대비 높은 각속도
-PASS_DISTANCE_CM = 150.0      # 평행 직진 통과 구간
+PASS_DISTANCE_CM = 80.0      # 평행 직진 통과 구간
 PASS_TIMEOUT_S = PASS_DISTANCE_CM / (PASS_SPEED * 100.0)
 RECOVERY_TIMEOUT_S = 6.0      
 
