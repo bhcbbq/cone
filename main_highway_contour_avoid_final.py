@@ -26,8 +26,7 @@ FRAME_WIDTH = 640
 FRAME_TIMEOUT = 0.5
 MAX_CAMERA_FAILURES = 3
 
-# [통합] BASE_SPEED 적용 
-BASE_SPEED = 0.15             # m/s (일반 차선 추종)[cite: 6]
+BASE_SPEED = 0.15             # m/s (일반 차선 추종)
 AVOID_SPEED = 0.10            # m/s (기본 회피 보조 속도)
 PASS_SPEED = 0.12             # m/s (대각선 전진 및 직진 통과 속도)
 
@@ -52,7 +51,7 @@ TERMINAL_LOG_INTERVAL_S = 1.0
 
 SHOW_WINDOWS = bool(os.environ.get("DISPLAY")) and not bool(
     os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_CLIENT") or os.environ.get("SSH_TTY")
-)[cite: 6]
+)
 
 
 # ============================================================
@@ -136,7 +135,7 @@ def gstreamer_pipeline(
         "video/x-raw, format=(string)BGR ! "
         "appsink drop=true max-buffers=1 sync=false"
         % (sensor_id, capture_width, capture_height, framerate, flip_method, display_width, display_height)
-    )[cite: 6]
+    )
 
 
 # ============================================================
@@ -145,9 +144,9 @@ def gstreamer_pipeline(
 def process_lane_frame(frame, tracker, now):
     target_height = max(2, round(frame.shape[0] * FRAME_WIDTH / frame.shape[1]))
     frame = cv2.resize(frame, (FRAME_WIDTH, target_height))
-    raw_edges, edges, top, bottom = lane_detection.get_edges(frame, return_raw=True)[cite: 6]
-    pair, status, inferred = tracker.update(edges, top, bottom, now)[cite: 6]
-    result_image, error, is_detected = lane_detection.draw_result(frame.copy(), pair, status, inferred, top, bottom)[cite: 6]
+    raw_edges, edges, top, bottom = lane_detection.get_edges(frame, return_raw=True)
+    pair, status, inferred = tracker.update(edges, top, bottom, now)
+    result_image, error, is_detected = lane_detection.draw_result(frame.copy(), pair, status, inferred, top, bottom)
     return error, result_image, is_detected, raw_edges, edges, status, pair
 
 
@@ -216,10 +215,6 @@ def read_distances(reader):
 
 
 def control_thread_task(ugv_serial):
-    """
-    main_ver1_2.py와 동일하게 새 영상결과 갱신 시에만 PD 제어를 수행하며[cite: 6], 
-    회피 기동 오버라이드(FSM) 명령을 통합 처리합니다.
-    """
     global is_running, control_failure
     previous_error = None
     previous_frame_time = None
@@ -230,7 +225,7 @@ def control_thread_task(ugv_serial):
 
     try:
         while is_running:
-            ugv_control.clear_feedback_buffer(ugv_serial)[cite: 6]
+            ugv_control.clear_feedback_buffer(ugv_serial)
             now = time.monotonic()
 
             with error_lock:
@@ -239,47 +234,45 @@ def control_thread_task(ugv_serial):
                 override = shared_angular_override
                 frame_time = shared_frame_time
 
-            stale = (frame_time is None or now - frame_time > FRAME_TIMEOUT)[cite: 6]
+            stale = (frame_time is None or now - frame_time > FRAME_TIMEOUT)
 
-            # FSM 오버라이드가 없을 경우 main_ver1_2.py와 동일한 안전/PID 처리[cite: 6]
             if stale or (current_speed <= 0 and override is None):
                 current_speed = 0.0 if override is None else current_speed
                 angular_z = override if override is not None else 0.0
-                previous_error = None[cite: 6]
-                previous_frame_time = None[cite: 6]
-                frame_dt = None[cite: 6]
+                previous_error = None
+                previous_frame_time = None
+                frame_dt = None
             else:
                 if override is not None:
-                    # FSM 강제 조향 시 PID 기록 초기화
                     angular_z = override
                     previous_error = None
                     previous_frame_time = None
                 else:
-                    new_frame = (previous_frame_time is None or frame_time != previous_frame_time)[cite: 6]
+                    new_frame = (previous_frame_time is None or frame_time != previous_frame_time)
                     if new_frame:
-                        if previous_frame_time is None:[cite: 6]
-                            frame_dt = None[cite: 6]
+                        if previous_frame_time is None:
+                            frame_dt = None
                         else:
-                            frame_dt = (frame_time - previous_frame_time)[cite: 6]
+                            frame_dt = (frame_time - previous_frame_time)
 
                         angular_z = ugv_control.calculate_pid(
                             current_error,
                             previous_error,
-                            (frame_dt if frame_dt is not None else 1.0)[cite: 6]
+                            (frame_dt if frame_dt is not None else 1.0)
                         )
-                        previous_error = current_error[cite: 6]
-                        previous_frame_time = frame_time[cite: 6]
+                        previous_error = current_error
+                        previous_frame_time = frame_time
 
-            ugv_control.send_driving_command(ugv_serial, current_speed, angular_z)[cite: 6]
+            ugv_control.send_driving_command(ugv_serial, current_speed, angular_z)
             time.sleep(CONTROL_PERIOD_S)
 
     except Exception as exc:
-        control_failure = f"{type(exc).__name__}: {exc}"[cite: 6]
-        print(f"[에러] 제어 스레드 중단: {control_failure}", flush=True)[cite: 6]
+        control_failure = f"{type(exc).__name__}: {exc}"
+        print(f"[에러] 제어 스레드 중단: {control_failure}", flush=True)
         is_running = False
     finally:
         try:
-            ugv_control.send_driving_command(ugv_serial, 0.0, 0.0)[cite: 6]
+            ugv_control.send_driving_command(ugv_serial, 0.0, 0.0)
         except:
             pass
 
@@ -301,7 +294,7 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
 
         if front_obstacle_count >= 3:
             front_obstacle_count = 0
-            force_stop() # 4kg 관성 방지 정지
+            force_stop()
             avoid_direction = get_obstacle_direction_by_contour(frame, pair)
             print(f"\n[OBSTACLE DETECTED] Front: {front_d:.1f}cm -> Avoid Dir: {avoid_direction.name}", flush=True)
             transition(State.AVOID_TURN_OUT)
@@ -327,13 +320,12 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
             transition(State.AVOID_ALIGN)
         return
 
-    # [4] 제자리 정렬 후 전방 재확인 (추가 요구사항 적용)
+    # [4] 제자리 정렬 후 전방 재확인
     if state == State.AVOID_ALIGN:
         set_command(0.0, -avoid_direction.value * TURN_ANGULAR_SPEED)
         
         if state_elapsed() >= ALIGN_TIME_S:
             force_stop()
-            # 정렬 후 전방 센서에 아직 장애물이 걸리면 루프 백 (Loop)
             if front_d > 0.0 and front_d <= FRONT_STOP_CM:
                 print(f"[RE-AVOID] 넓은 장애물 감지! 추가 회피 진행 (현재 거리: {front_d:.1f}cm)", flush=True)
                 transition(State.AVOID_TURN_OUT)
@@ -391,8 +383,8 @@ def main():
     global is_running, shared_error, shared_speed, shared_frame_time
     global control_failure
 
-    if lane_detection.ROAD_MODE not in ("highway", "black_track"):[cite: 6]
-        print("[에러] ROAD_MODE 설정을 확인하세요.", flush=True)[cite: 6]
+    if lane_detection.ROAD_MODE not in ("highway", "black_track"):
+        print("[에러] ROAD_MODE 설정을 확인하세요.", flush=True)
         return
 
     ugv_serial = None
@@ -404,14 +396,14 @@ def main():
     
     try:
         ugv_serial = ugv_control.init_ugv(port=UGV_PORT, baudrate=SERIAL_BAUD)
-        ugv_control.send_driving_command(ugv_serial, 0.0, 0.0)[cite: 6]
+        ugv_control.send_driving_command(ugv_serial, 0.0, 0.0)
 
         ultrasonic = create_ultrasonic_reader()
         time.sleep(0.5)
 
-        cap = cv2.VideoCapture(gstreamer_pipeline(flip_method=0), cv2.CAP_GSTREAMER)[cite: 6]
+        cap = cv2.VideoCapture(gstreamer_pipeline(flip_method=0), cv2.CAP_GSTREAMER)
         
-        tracker = lane_detection.LaneTracker()[cite: 6]
+        tracker = lane_detection.LaneTracker()
 
         if SHOW_WINDOWS:
             cv2.namedWindow(window_name)
@@ -420,32 +412,32 @@ def main():
         control_thread.start()
         
         failure_count = 0
-        report_time = time.monotonic()[cite: 6]
+        report_time = time.monotonic()
 
         while is_running:
             if not cap.isOpened():
                 break
 
-            frame_started = time.monotonic()[cite: 6]
-            ret, frame = cap.read()[cite: 6]
+            frame_started = time.monotonic()
+            ret, frame = cap.read()
 
-            if not ret or frame is None or frame.size == 0:[cite: 6]
+            if not ret or frame is None or frame.size == 0:
                 force_stop()
-                tracker.reset()[cite: 6]
-                failure_count += 1[cite: 6]
-                if failure_count >= MAX_CAMERA_FAILURES:[cite: 6]
+                tracker.reset()
+                failure_count += 1
+                if failure_count >= MAX_CAMERA_FAILURES:
                     break
-                time.sleep(0.05)[cite: 6]
+                time.sleep(0.05)
                 continue
 
-            failure_count = 0[cite: 6]
+            failure_count = 0
 
             error, result_image, is_detected, raw_edges, edges, status, pair = process_lane_frame(frame, tracker, frame_started)
             
             left_d, front_d, right_d = read_distances(ultrasonic)
 
             with error_lock:
-                if not is_running:[cite: 6]
+                if not is_running:
                     break
                 shared_frame_time = frame_started
 
@@ -453,42 +445,42 @@ def main():
 
             now = time.monotonic()
             if now - report_time >= TERMINAL_LOG_INTERVAL_S:
-                usable = (bool(is_detected) and now - frame_started <= FRAME_TIMEOUT)[cite: 6]
+                usable = (bool(is_detected) and now - frame_started <= FRAME_TIMEOUT)
                 print(
                     f"[MONITOR] State: {state.name:<15} | "
                     f"US Front: {front_d:5.1f}cm | "
                     f"Lane Error: {error:+.1f} | Status: {status} | Usable: {usable}", flush=True
                 )
-                report_time = now[cite: 6]
+                report_time = now
 
             if SHOW_WINDOWS:
                 cv2.putText(result_image, f"STATE: {state.name}", (10, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
                 cv2.putText(result_image, f"Avoid: {avoid_direction.name}", (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 0), 1)
                 
                 cv2.imshow(window_name, result_image)
-                if cv2.waitKey(1) & 0xFF in (ord("q"), ord("Q"), 27):[cite: 6]
+                if cv2.waitKey(1) & 0xFF in (ord("q"), ord("Q"), 27):
                     break
                     
-        if control_failure is not None:[cite: 6]
-            print(f"제어 오류: {control_failure}")[cite: 6]
+        if control_failure is not None:
+            print(f"제어 오류: {control_failure}")
 
-    except KeyboardInterrupt:[cite: 6]
+    except KeyboardInterrupt:
         print("\n[STOP] Keyboard Interrupt detected.")
     except Exception as exc:
-        traceback.print_exc()[cite: 6]
+        traceback.print_exc()
     finally:
         is_running = False
         force_stop()
         if control_thread is not None:
-            control_thread.join()[cite: 6]
+            control_thread.join()
         if ugv_serial is not None:
-            ugv_control.stop_ugv(ugv_serial)[cite: 6]
+            ugv_control.stop_ugv(ugv_serial)
         if ultrasonic is not None:
             ultrasonic.stop()
         if cap is not None:
-            cap.release()[cite: 6]
-        if SHOW_WINDOWS:[cite: 6]
-            cv2.destroyAllWindows()[cite: 6]
+            cap.release()
+        if SHOW_WINDOWS:
+            cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     main()
