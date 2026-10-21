@@ -31,8 +31,8 @@ AVOID_SPEED = 0.10            # m/s (기본 회피 보조 속도)
 PASS_SPEED = 0.12             # m/s (대각선 전진 및 직진 통과 속도)
 
 # [장애물 회피 파라미터]
-FRONT_STOP_CM = 60.0          # 회피 시작 기준 거리
-OBSTACLE_CLEAR_CM = 65.0      
+FRONT_STOP_CM = 45.0          # 회피 시작 기준 거리
+OBSTACLE_CLEAR_CM = 50.0    
 OBSTACLE_CLEAR_HOLD_S = 0.5
 
 # 제자리 회전 및 대각선 시간 설정
@@ -63,7 +63,12 @@ class State(Enum):
     AVOID_DIAGONAL = auto()    # [직진 상태] 대각선 전진
     AVOID_ALIGN = auto()       # [정지 상태] 제자리 정렬 회전
     AVOID_FORWARD = auto()     # [직진 상태] 직진 통과
-    RECOVERY_TURN = auto()     # 차선 복귀 회전
+    
+    # [복귀 단계 추가]
+    RECOVERY_TURN_IN = auto()  # [정지 상태] 차선 방향으로 제자리 회전
+    RECOVERY_DIAGONAL = auto() # [직진 상태] 복귀 대각선 전진
+    RECOVERY_ALIGN = auto()    # [정지 상태] 차선 정렬 회전
+    
     BLOCKED_STOP = auto()      # 비상 정지
 
 class AvoidDirection(Enum):
@@ -88,6 +93,11 @@ avoid_direction = AvoidDirection.LEFT
 obstacle_clear_since = None              
 front_obstacle_count = 0                 
 recovery_detect_count = 0                
+
+# [카운터 변수 추가]
+avoid_count = 0           # 회피 동작 수행 횟수 카운트
+recovery_done_count = 0    # 복귀 동작 수행 횟수 카운트
+
 
 def set_command(speed, angular_override, error=None):
     global shared_speed, shared_angular_override, shared_error
@@ -278,11 +288,12 @@ def control_thread_task(ugv_serial):
 
 
 # ============================================================
-# FSM (루프백 회피 로직 포함)
+# FSM (회피 횟수 대칭 복귀 로직 포함)
 # ============================================================
 def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
     global avoid_direction, obstacle_clear_since, state
     global front_obstacle_count, recovery_detect_count
+    global avoid_count, recovery_done_count
     now = time.monotonic()
 
     # [1] 일반 차선 추종
@@ -294,6 +305,8 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
 
         if front_obstacle_count >= 3:
             front_obstacle_count = 0
+            avoid_count = 0          # 회피 횟수 초기화
+            recovery_done_count = 0  # 복귀 횟수 초기화
             force_stop()
             avoid_direction = get_obstacle_direction_by_contour(frame, pair)
             print(f"\n[OBSTACLE DETECTED] Front: {front_d:.1f}cm -> Avoid Dir: {avoid_direction.name}", flush=True)
@@ -304,7 +317,7 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
             set_command(BASE_SPEED, None, error=error)
         return
 
-    # [2] 제자리 회전 
+    # [2] 제자리 회전 (회피 방향으로 틀기)
     if state == State.AVOID_TURN_OUT:
         set_command(0.0, avoid_direction.value * TURN_ANGULAR_SPEED)
         if state_elapsed() >= TURN_OUT_TIME_S:
@@ -312,7 +325,7 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
             transition(State.AVOID_DIAGONAL)
         return
 
-    # [3] 대각선 전진 
+    # [3] 대각선 전진
     if state == State.AVOID_DIAGONAL:
         set_command(PASS_SPEED, 0.0)
         if state_elapsed() >= DIAGONAL_TIME_S:
@@ -320,12 +333,15 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
             transition(State.AVOID_ALIGN)
         return
 
-    # [4] 제자리 정렬 후 전방 재확인
+    # [4] 제자리 정렬 후 횟수 기록 & 전방 재확인
     if state == State.AVOID_ALIGN:
         set_command(0.0, -avoid_direction.value * TURN_ANGULAR_SPEED)
         
         if state_elapsed() >= ALIGN_TIME_S:
             force_stop()
+            avoid_count += 1 # 회피 횟수 1 증가!
+            print(f"[AVOID COUNTER] 현재 회피 횟수: {avoid_count}회", flush=True)
+            
             if front_d > 0.0 and front_d <= FRONT_STOP_CM:
                 print(f"[RE-AVOID] 넓은 장애물 감지! 추가 회피 진행 (현재 거리: {front_d:.1f}cm)", flush=True)
                 transition(State.AVOID_TURN_OUT)
@@ -338,28 +354,69 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
         set_command(PASS_SPEED, 0.0)
         if state_elapsed() >= PASS_TIMEOUT_S:
             force_stop()
-            transition(State.RECOVERY_TURN)
+            recovery_done_count = 0
+            transition(State.RECOVERY_TURN_IN)
         return
 
-    # [6] 차선 복귀 회전
-    if state == State.RECOVERY_TURN:
-        if state_elapsed() >= RECOVERY_TIMEOUT_S:
-            force_stop()
-            transition(State.BLOCKED_STOP)
-            return
-
+    # ============================================================
+    # [6] 대칭 복귀 기동 (avoid_count 횟수만큼 복귀 기동 반복)
+    # ============================================================
+    
+    # 6-1. 차선 방향으로 틀기 (회피 방향의 반대)
+    if state == State.RECOVERY_TURN_IN:
+        # 복귀 중 차선이 선명하게 잡히면 즉시 차선 추종으로 전환
         if is_detected:
             recovery_detect_count += 1
+            if recovery_detect_count >= 5:
+                recovery_detect_count = 0
+                force_stop()
+                print("[RECOVERY COMPLETE] 차선 선명 감지 -> 차선 추종 복귀", flush=True)
+                transition(State.LANE_FOLLOWING)
+                return
         else:
             recovery_detect_count = 0
 
-        if recovery_detect_count >= 5:
-            recovery_detect_count = 0
+        set_command(0.0, -avoid_direction.value * TURN_ANGULAR_SPEED)
+        if state_elapsed() >= TURN_OUT_TIME_S:
             force_stop()
-            transition(State.LANE_FOLLOWING)
-            return
+            transition(State.RECOVERY_DIAGONAL)
+        return
 
-        set_command(AVOID_SPEED, -avoid_direction.value * TURN_ANGULAR_SPEED)
+    # 6-2. 대각선 전진 복귀
+    if state == State.RECOVERY_DIAGONAL:
+        if is_detected:
+            recovery_detect_count += 1
+            if recovery_detect_count >= 5:
+                recovery_detect_count = 0
+                force_stop()
+                print("[RECOVERY COMPLETE] 차선 선명 감지 -> 차선 추종 복귀", flush=True)
+                transition(State.LANE_FOLLOWING)
+                return
+        else:
+            recovery_detect_count = 0
+
+        set_command(PASS_SPEED, 0.0)
+        if state_elapsed() >= DIAGONAL_TIME_S:
+            force_stop()
+            transition(State.RECOVERY_ALIGN)
+        return
+
+    # 6-3. 차선 정렬 회전
+    if state == State.RECOVERY_ALIGN:
+        set_command(0.0, avoid_direction.value * TURN_ANGULAR_SPEED)
+        if state_elapsed() >= ALIGN_TIME_S:
+            force_stop()
+            recovery_done_count += 1
+            print(f"[RECOVERY COUNTER] 복귀 진행 {recovery_done_count}/{avoid_count}회 완료", flush=True)
+
+            # 회피했던 횟수만큼 복귀했거나, 차선이 잡혔으면 완료
+            if recovery_done_count >= avoid_count or is_detected:
+                avoid_count = 0
+                recovery_done_count = 0
+                transition(State.LANE_FOLLOWING)
+            else:
+                # 회피 횟수가 더 남아있으면 복귀 기동 한번 더 수행
+                transition(State.RECOVERY_TURN_IN)
         return
 
     # [7] 비상 정지 대기
@@ -447,15 +504,15 @@ def main():
             if now - report_time >= TERMINAL_LOG_INTERVAL_S:
                 usable = (bool(is_detected) and now - frame_started <= FRAME_TIMEOUT)
                 print(
-                    f"[MONITOR] State: {state.name:<15} | "
-                    f"US Front: {front_d:5.1f}cm | "
-                    f"Lane Error: {error:+.1f} | Status: {status} | Usable: {usable}", flush=True
+                    f"[MONITOR] State: {state.name:<18} | "
+                    f"US Front: {front_d:5.1f}cm | Avoid/Recov: {avoid_count}/{recovery_done_count} | "
+                    f"Lane Error: {error:+.1f} | Usable: {usable}", flush=True
                 )
                 report_time = now
 
             if SHOW_WINDOWS:
                 cv2.putText(result_image, f"STATE: {state.name}", (10, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
-                cv2.putText(result_image, f"Avoid: {avoid_direction.name}", (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 0), 1)
+                cv2.putText(result_image, f"Avoid: {avoid_direction.name} ({avoid_count}x)", (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 0), 1)
                 
                 cv2.imshow(window_name, result_image)
                 if cv2.waitKey(1) & 0xFF in (ord("q"), ord("Q"), 27):
