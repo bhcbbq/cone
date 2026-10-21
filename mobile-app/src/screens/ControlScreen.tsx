@@ -506,8 +506,8 @@ export function RobotControlScreen({
 
                         <Text style={styles.headerBatteryValue}>
                           {typeof batteryVoltage === 'number'
-                            ? `${batteryVoltage.toFixed(1)} V`
-                            : '--.- V'}
+                            ? `${batteryVoltage.toFixed(2)} V`
+                            : '--.-- V'}
                         </Text>
                       </View>
 

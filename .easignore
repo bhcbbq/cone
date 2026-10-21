@@ -1,0 +1,28 @@
+# App dependencies / generated files
+mobile-app/node_modules/
+mobile-app/.expo/
+mobile-app/dist/
+mobile-app/web-build/
+mobile-app/android/
+mobile-app/ios/
+mobile-app/.kotlin/
+mobile-app/eas-archive/
+
+# IDE / misc
+mobile-app/.vscode/
+mobile-app/.claude/
+
+# Other project parts not needed for app build
+relay-esp32/
+
+# Jetson / Python files in repo root
+*.py
+
+# Build artifacts
+*.apk
+*.aab
+*.tar.gz
+*.zip
+
+# Git
+.git/

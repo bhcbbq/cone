@@ -35,10 +35,16 @@ FRONT_STOP_CM = 60.0          # 회피 시작 기준 거리
 OBSTACLE_CLEAR_CM = 65.0      
 OBSTACLE_CLEAR_HOLD_S = 0.5
 
+<<<<<<< HEAD
 # 제자리 회전 및 대각선 시간 설정
 TURN_OUT_TIME_S = 0.45        
 DIAGONAL_TIME_S = 1.0         
 ALIGN_TIME_S = 0.45           
+=======
+NORMAL_SPEED = 0.3           # m/s (일반 차선 추종)
+AVOID_SPEED = 0.10            # m/s (S자 회피 속도)
+PASS_SPEED = 0.12             # m/s (장애물 측면 직진 통과 속도)
+>>>>>>> 7a68bf3c8de2a0fc36dc08d163e2bc48c9607cc4
 
 TURN_ANGULAR_SPEED = 1.8      # 무거운 차체 대비 높은 각속도
 PASS_DISTANCE_CM = 150.0      # 평행 직진 통과 구간
