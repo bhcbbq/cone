@@ -24,7 +24,7 @@ from enum import Enum, auto
 import lane_detection
 import ugv_control
 from ultrasonic_reader import UltrasonicReader
-
+from light_control import LightControl
 
 # ============================================================
 # Configuration
@@ -61,6 +61,10 @@ RECOVERY_TIMEOUT_S = 5.0
 CONTROL_PERIOD_S = 0.02
 CAMERA_PERIOD_S = 0.03
 NO_OBSTACLE = -1.0
+
+# lighting cont
+LIGHT_ENABLED = True
+LIGHT_TOGGLE_KEY = ord("l")   # 영상 창에서 l 키로 켜기/끄기
 
 # CSI camera GStreamer pipeline
 GST_PIPELINE = (
@@ -104,6 +108,40 @@ last_lane_space = (None, None)
 obstacle_clear_since = None
 last_blocked_log_time = 0.0
 
+# light
+light = None
+
+
+def find_reader_serial(reader):
+    """UltrasonicReader 내부의 serial 객체를 찾는다."""
+    for name in ("ser", "serial", "serial_port", "_serial", "_ser", "port_obj"):
+        obj = getattr(reader, name, None)
+        if obj is not None and hasattr(obj, "write"):
+            return obj
+    return None
+
+
+def init_light(reader):
+    global light
+    if not LIGHT_ENABLED:
+        return
+    ser = find_reader_serial(reader)
+    if ser is None:
+        print("[LIGHT] 아두이노 시리얼 객체를 찾지 못해 조명 기능을 끕니다.")
+        return
+    light = LightControl.from_serial(ser)
+    print("[LIGHT] 조명 제어 준비 완료 (l 키: 토글)")
+
+
+def set_light(on):
+    """다른 코드(앱 버튼 등)에서도 호출할 수 있는 함수."""
+    if light is None:
+        return
+    try:
+        light.on() if on else light.off()
+        print(f"[LIGHT] {'ON' if on else 'OFF'}")
+    except Exception as exc:
+        print(f"[LIGHT ERROR] {exc!r}")
 
 def set_command(speed, angular_override, error=None):
     global shared_speed, shared_angular_override, shared_error
@@ -543,6 +581,7 @@ def main():
 
         print("[INIT] Connecting ultrasonic Arduino...")
         ultrasonic = create_ultrasonic_reader()
+        init_light(ultrasonic)
 
         print("[INIT] Opening CSI camera...")
         camera = open_camera()
@@ -598,8 +637,11 @@ def main():
             )
 
             cv2.imshow("UGV02 main_test", annotated)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
                 break
+            if key == LIGHT_TOGGLE_KEY and light is not None:   # [조명]
+                set_light(not light.is_on)
 
             time.sleep(CAMERA_PERIOD_S)
 
@@ -619,6 +661,12 @@ def main():
                 ugv_control.stop_ugv(ugv_serial)
             except Exception as exc:
                 print(f"[STOP WARNING] {exc!r}")
+
+        if light is not None:                # [조명] 추가
+            try:
+                light.off()
+            except Exception:
+                pass
 
         if ultrasonic is not None:
             try:
