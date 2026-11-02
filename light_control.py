@@ -1,5 +1,3 @@
-cd ~/cone
-cat > light_control.py << 'EOF'
 import threading
 
 
@@ -30,6 +28,3 @@ class LightControl:
 
     def toggle(self):
         self.off() if self.is_on else self.on()
-EOF
-ls light_control.py
-python3 main_test.py
