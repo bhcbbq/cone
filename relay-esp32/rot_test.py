@@ -3,7 +3,7 @@
 rot_test.py - UGV02 제자리 회전 실측 도구 (ugv_control.py 와 같은 폴더에서 실행)
 
 실행 전: main_highway_contour_avoid_final.py 등 UGV 포트(/dev/ttyACM0)를 쓰는 프로그램을 모두 종료.
-로봇 주변 1m 정도 비워두기. Ctrl-C 로 언제든 정지.
+로봇 주변 1m 정도 비워두기. Ctrl-C 로 언제든 정지.ttt
 
 사용 예
   python3 rot_test.py                          # 1.8 rad/s 로 0.45초 펄스 x5회 (TURN_OUT 과 동일 조건)
