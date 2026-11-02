@@ -36,9 +36,9 @@ OBSTACLE_CLEAR_CM = 50.0
 OBSTACLE_CLEAR_HOLD_S = 0.5
 
 # 제자리 회전 및 대각선 시간 설정
-TURN_OUT_TIME_S = 0.45        
+TURN_OUT_TIME_S = 0.60
 DIAGONAL_TIME_S = 1.0         
-ALIGN_TIME_S = 0.45           
+ALIGN_TIME_S = 0.60
 
 TURN_ANGULAR_SPEED = 1.8      # 무거운 차체 대비 높은 각속도
 PASS_DISTANCE_CM = 80.0      # 평행 직진 통과 구간
