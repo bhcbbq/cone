@@ -320,11 +320,7 @@ def hc12_thread_task():
                             send_hc12("ERROR:INVALID_SPEED")
                             continue
 
-                        if not (
-                            MANUAL_SPEED_MIN
-                            <= new_speed
-                            <= MANUAL_SPEED_MAX
-                        ):
+                        if not (MANUAL_SPEED_MIN <= new_speed <= MANUAL_SPEED_MAX):
                             print("[수동 속도 오류] 범위 초과:", new_speed)
                             send_hc12("ERROR:INVALID_SPEED")
                             continue
@@ -683,13 +679,17 @@ def ugv_receive_thread_task():
 
             if line.startswith('{"T":2100'):
 
+                # 통신 테스트용: T2100에서 엔코더 값만 사용
+                # 뒤쪽 battery / IMU / yaw 값이 깨져 있어도 odl, odr만 읽는다.
                 try:
 
-                    data = json.loads(line)
+                    odl_text = line.split('"odl":', 1)[1].split(",", 1)[0]
 
-                    odl = float(data["odl"])
+                    odr_tail = line.split('"odr":', 1)[1]
+                    odr_text = odr_tail.split(",", 1)[0].split("}", 1)[0]
 
-                    odr = float(data["odr"])
+                    odl = float(odl_text)
+                    odr = float(odr_text)
 
                 except Exception as e:
 
@@ -939,7 +939,7 @@ def control_thread_task():
                 '{"T":1,'
                 f'"L":{current_manual_left:.3f},'
                 f'"R":{current_manual_right:.3f}'
-                '}'
+                "}"
             )
 
         # ============================================================
@@ -949,12 +949,7 @@ def control_thread_task():
         elif current_mode == "RETURN_TURN":
 
             # 좌우 바퀴를 반대 방향으로 돌려 제자리에서 180도 회전
-            send_raw_ugv(
-                '{"T":1,'
-                f'"L":{-TURN_SPEED},'
-                f'"R":{TURN_SPEED}'
-                '}'
-            )
+            send_raw_ugv('{"T":1,' f'"L":{-TURN_SPEED},' f'"R":{TURN_SPEED}' "}")
 
         # ============================================================
         # RETURN_ALIGN
