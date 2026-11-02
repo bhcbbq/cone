@@ -31,7 +31,7 @@ AVOID_SPEED = 0.15            # m/s (기본 회피 보조 속도)
 PASS_SPEED = 0.20             # m/s (대각선 전진 및 직진 통과 속도)
 
 # [장애물 회피 파라미터]
-FRONT_STOP_CM = 45.0          # 회피 시작 기준 거리
+FRONT_STOP_CM = 80.0         # 회피 시작 기준 거리
 OBSTACLE_CLEAR_CM = 50.0    
 OBSTACLE_CLEAR_HOLD_S = 0.5
 
