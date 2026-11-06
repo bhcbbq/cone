@@ -2,7 +2,6 @@ import cv2
 import time
 import threading
 import json
-import math
 import serial
 import numpy as np
 
@@ -44,10 +43,6 @@ ALIGN_STABLE_FRAMES = 8
 
 HC12_PORT = "/dev/ttyTHS1"
 HC12_BAUD = 115200
-
-# UGV 데모 IMU 전도 감지 기준
-TIP_ANGLE_THRESHOLD_DEG = 60.0
-TIP_HOLD_SECONDS = 0.5
 
 
 # ============================================================
@@ -101,10 +96,6 @@ mission_outbound_total = 0.0
 # RETURN 시 돌아가야 하는 거리
 return_drive_distance = 0.0
 
-# 데모 UGV에는 T2101/T2102 로컬 목표거리 기능이 없으므로
-# 목표거리는 Jetson에서 저장하고 T1001 엔코더로 도달 여부를 판단한다.
-target_distance_m = 0.0
-
 
 # ============================================================
 # RETURN STATE
@@ -123,9 +114,8 @@ paused_return_mode = None
 
 lane_lost_printed = False
 
-# 전도 감지 상태
-tip_started_at = None
-tip_latched = False
+# 전도 알림 중복 전송 방지
+tipped_notified = False
 
 
 # ============================================================
@@ -210,7 +200,6 @@ def hc12_thread_task():
 
     global mission_outbound_total
     global return_drive_distance
-    global target_distance_m
 
     global return_turn_start_odl
     global return_turn_start_odr
@@ -490,13 +479,12 @@ def hc12_thread_task():
                                     mission_outbound_total = 0.0
                                     return_drive_distance = 0.0
 
-                                # 데모 UGV에는 T2101이 없으므로 Jetson이 목표거리 저장
-                                target_distance_m = distance
-
                                 start_odl = None
                                 start_odr = None
 
                                 stop_pending = False
+
+                            send_raw_ugv('{"T":2101,"d":' + str(distance) + "}")
 
                             send_hc12(f"TARGET:{distance:.2f}")
 
@@ -616,7 +604,6 @@ def hc12_thread_task():
 
                             mission_outbound_total = 0.0
                             return_drive_distance = 0.0
-                            target_distance_m = 0.0
 
                             paused_mission = False
                             align_stable_count = 0
@@ -661,14 +648,11 @@ def ugv_receive_thread_task():
 
     global mission_outbound_total
     global return_drive_distance
-    global target_distance_m
-
-    global tip_started_at
-    global tip_latched
 
     global return_drive_start_odl
     global return_drive_start_odr
     global paused_return_mode
+    global tipped_notified
 
     print("[알림] UGV 수신 스레드 시작")
 
@@ -694,77 +678,75 @@ def ugv_receive_thread_task():
             print("[UGV RX]", line)
 
             # ========================================================
-            # UGV DEMO T1001
-            # - odl / odr: meter
-            # - r / p / y: radian
-            # - ax / ay / az: IMU acceleration
-            # - v: battery voltage
+            # T2100 ODOMETRY
             # ========================================================
 
-            if line.startswith('{"T":1001'):
+            if line.startswith('{"T":2100'):
 
+                # T2100에서 엔코더 + 전도 상태 사용
+                # 뒤쪽 일부 값이 깨져도 필요한 필드만 문자열로 안전하게 읽는다.
                 try:
 
-                    data = json.loads(line)
+                    odl_text = line.split('"odl":', 1)[1].split(",", 1)[0]
 
-                    odl = float(data["odl"])
-                    odr = float(data["odr"])
+                    odr_tail = line.split('"odr":', 1)[1]
+                    odr_text = odr_tail.split(",", 1)[0].split("}", 1)[0]
 
-                    # 데모 IMU roll / pitch는 radian
-                    roll = float(data.get("r", 0.0))
-                    pitch = float(data.get("p", 0.0))
+                    odl = float(odl_text)
+                    odr = float(odr_text)
+
+                    tipped = False
+
+                    if '"tipped":' in line:
+                        tipped_text = (
+                            line.split('"tipped":', 1)[1]
+                            .split(",", 1)[0]
+                            .split("}", 1)[0]
+                            .strip()
+                            .lower()
+                        )
+
+                        tipped = tipped_text in ("1", "true")
 
                 except Exception as e:
 
-                    print("[T1001 오류]", e)
+                    print("[T2100 오류]", e)
 
                     continue
 
                 # =====================================================
-                # IMU 전도 감지
-                # 60도 이상 기울어진 상태가 0.5초 지속되면 정지
+                # 전도 감지
+                # UGV에서 tipped=true/1 수신 시 즉시 정지 + 앱 알림
+                # 같은 전도 상태에서는 한 번만 알림 전송
                 # =====================================================
 
-                roll_deg = abs(math.degrees(roll))
-                pitch_deg = abs(math.degrees(pitch))
-                tipped_now = (
-                    roll_deg >= TIP_ANGLE_THRESHOLD_DEG
-                    or pitch_deg >= TIP_ANGLE_THRESHOLD_DEG
-                )
+                if tipped:
 
-                if tipped_now:
-
-                    if tip_started_at is None:
-                        tip_started_at = time.time()
-
-                    elif (
-                        not tip_latched
-                        and time.time() - tip_started_at >= TIP_HOLD_SECONDS
-                    ):
-
-                        tip_latched = True
+                    if not tipped_notified:
 
                         with state_lock:
+
                             mode = "IDLE"
                             stop_pending = False
                             paused_return_mode = None
 
                         stop_ugv_now()
 
-                        # 기존 앱에서 즉시 정지 상태로 처리할 수 있도록 EMERGENCY도 전송
                         send_hc12("TIPPED")
                         send_hc12("EMERGENCY")
 
-                        print(
-                            "[전도감지] UGV STOP",
-                            f"roll={roll_deg:.1f}",
-                            f"pitch={pitch_deg:.1f}",
-                        )
+                        tipped_notified = True
+
+                        print("[전도 감지] UGV 즉시 정지")
+                        print("[전도 감지] 앱으로 TIPPED 알림 전송")
+
+                    # 전도 중에는 거리/RETURN 로직 처리하지 않음
+                    continue
 
                 else:
 
-                    tip_started_at = None
-                    tip_latched = False
+                    # 다시 정상 자세가 되면 다음 전도 감지를 허용
+                    tipped_notified = False
 
                 with state_lock:
 
@@ -775,7 +757,6 @@ def ugv_receive_thread_task():
 
                     # =================================================
                     # 일반 DRIVE / STOP 거리 계산
-                    # 데모 odl/odr는 이미 meter이므로 /100 하지 않음
                     # =================================================
 
                     if current_mode in ("DRIVE", "IDLE"):
@@ -787,42 +768,14 @@ def ugv_receive_thread_task():
                             start_odr = odr
 
                         delta_l = odl - start_odl
+
                         delta_r = odr - start_odr
 
-                        segment_distance = max(0.0, (delta_l + delta_r) / 2.0)
+                        segment_distance = max(0.0, ((delta_l + delta_r) / 2.0) / 100.0)
 
                         if current_mode == "DRIVE":
 
-                            send_hc12(f"DISTANCE:{segment_distance:.2f}")
-
-                            # 데모 UGV에는 T2102가 없으므로
-                            # Jetson이 목표거리 도달을 직접 판단한다.
-                            if (
-                                target_distance_m > 0.0
-                                and segment_distance >= target_distance_m
-                            ):
-
-                                mode = "IDLE"
-                                stop_pending = False
-
-                                stop_ugv_now()
-
-                                mission_outbound_total += segment_distance
-                                return_drive_distance = mission_outbound_total
-                                paused_mission = False
-
-                                send_hc12(f"DISTANCE:{segment_distance:.2f}")
-                                send_hc12("ARRIVED")
-
-                                print(
-                                    "[도착] 마지막 구간:",
-                                    f"{segment_distance:.2f} m",
-                                )
-                                print(
-                                    "[도착] RETURN 저장거리:",
-                                    f"{return_drive_distance:.2f} m",
-                                )
-                                print("[도착] ARRIVED - UGV STOP")
+                            send_hc12(f"DISTANCE:" f"{segment_distance:.2f}")
 
                         elif stop_pending:
 
@@ -830,7 +783,7 @@ def ugv_receive_thread_task():
 
                             return_drive_distance = mission_outbound_total
 
-                            send_hc12(f"DISTANCE:{segment_distance:.2f}")
+                            send_hc12(f"DISTANCE:" f"{segment_distance:.2f}")
 
                             send_hc12("STOPPED")
 
@@ -842,8 +795,7 @@ def ugv_receive_thread_task():
 
                     # =================================================
                     # RETURN_TURN
-                    # 기존 엔코더 회전 로직 그대로 유지
-                    # 데모 odl/odr는 이미 meter이므로 /100 하지 않음
+                    # 엔코더로 대략적인 회전
                     # =================================================
 
                     if current_mode == "RETURN_TURN":
@@ -853,9 +805,9 @@ def ugv_receive_thread_task():
                             and return_turn_start_odr is not None
                         ):
 
-                            left_m = abs(odl - return_turn_start_odl)
+                            left_m = abs(odl - return_turn_start_odl) / 100.0
 
-                            right_m = abs(odr - return_turn_start_odr)
+                            right_m = abs(odr - return_turn_start_odr) / 100.0
 
                             turn_distance = (left_m + right_m) / 2.0
 
@@ -878,7 +830,6 @@ def ugv_receive_thread_task():
 
                     # =================================================
                     # RETURN_DRIVE
-                    # 데모 odl/odr는 이미 meter이므로 /100 하지 않음
                     # =================================================
 
                     elif current_mode == "RETURN_DRIVE":
@@ -888,9 +839,9 @@ def ugv_receive_thread_task():
                             and return_drive_start_odr is not None
                         ):
 
-                            left_m = abs(odl - return_drive_start_odl)
+                            left_m = abs(odl - return_drive_start_odl) / 100.0
 
-                            right_m = abs(odr - return_drive_start_odr)
+                            right_m = abs(odr - return_drive_start_odr) / 100.0
 
                             returned_m = (left_m + right_m) / 2.0
 
@@ -913,6 +864,51 @@ def ugv_receive_thread_task():
                                 paused_return_mode = None
 
                                 print("[RETURN] 복귀 완료")
+
+            # ========================================================
+            # T2102 목표거리 도착
+            # ========================================================
+
+            elif '"T":2102' in line:
+
+                with state_lock:
+
+                    if mode != "DRIVE":
+                        continue
+
+                    mode = "IDLE"
+
+                    stop_pending = False
+
+                stop_ugv_now()
+
+                try:
+
+                    data = json.loads(line)
+
+                    arrived_distance = float(data["distance"])
+
+                    with state_lock:
+
+                        mission_outbound_total += arrived_distance
+
+                        return_drive_distance = mission_outbound_total
+
+                        paused_mission = False
+
+                    send_hc12(f"DISTANCE:" f"{arrived_distance:.2f}")
+
+                    print("[도착] 마지막 구간:", f"{arrived_distance:.2f} m")
+
+                    print("[도착] RETURN 저장거리:", f"{return_drive_distance:.2f} m")
+
+                except Exception as e:
+
+                    print("[T2102 거리 오류]", e)
+
+                send_hc12("ARRIVED")
+
+                print("[도착] ARRIVED - UGV STOP")
 
         except Exception as e:
 
@@ -1277,7 +1273,7 @@ if __name__ == "__main__":
             # CANNY
             edges = cv2.Canny(blur, 50, 150)
 
-            # ROI
+            # ROI (height * 0.1 작을 수록 인식 범위 확대)
             roi_vertices = [
                 (0, height),
                 (int(width * 0.1), int(height * 0.5)),
@@ -1375,4 +1371,3 @@ if __name__ == "__main__":
         cv2.destroyAllWindows()
 
         print("[종료] 완료")
-s

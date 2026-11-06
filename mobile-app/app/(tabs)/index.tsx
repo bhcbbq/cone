@@ -14,6 +14,8 @@ import {
 
 
 
+  Alert,
+
 } from 'react-native';
 
 
@@ -1407,6 +1409,21 @@ export default function HomeScreen() {
 
 
 
+
+
+
+    if (message === 'TIPPED') {
+
+      setRobotStatus('stopped');
+
+      Alert.alert(
+        '전도 감지',
+        '라바콘이 넘어졌습니다.'
+      );
+
+      return;
+
+    }
 
 
 
