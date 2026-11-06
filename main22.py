@@ -656,6 +656,9 @@ def ugv_receive_thread_task():
 
     print("[알림] UGV 수신 스레드 시작")
 
+    # 앱 배터리 전송 주기 제어
+    last_battery_send_time = 0.0
+
     while is_running:
 
         try:
@@ -695,6 +698,17 @@ def ugv_receive_thread_task():
                     odl = float(odl_text)
                     odr = float(odr_text)
 
+                    # UGV가 T2100으로 보내는 배터리 전압
+                    battery = None
+                    if '"battery":' in line:
+                        battery_text = (
+                            line.split('"battery":', 1)[1]
+                            .split(",", 1)[0]
+                            .split("}", 1)[0]
+                            .strip()
+                        )
+                        battery = float(battery_text)
+
                     tipped = False
 
                     if '"tipped":' in line:
@@ -713,6 +727,19 @@ def ugv_receive_thread_task():
                     print("[T2100 오류]", e)
 
                     continue
+
+                # =====================================================
+                # 배터리 전압 -> 앱
+                # T2100은 자주 오므로 HC-12에는 1초에 한 번만 전송
+                # =====================================================
+
+                if battery is not None:
+                    now = time.time()
+
+                    if now - last_battery_send_time >= 1.0:
+                        send_hc12(f"BATTERY:{battery:.2f}")
+                        last_battery_send_time = now
+                        print("[배터리]", f"{battery:.2f} V")
 
                 # =====================================================
                 # 전도 감지
