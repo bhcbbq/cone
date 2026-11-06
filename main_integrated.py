@@ -1222,7 +1222,7 @@ if __name__ == "__main__":
             # CANNY
             edges = cv2.Canny(blur, 50, 150)
 
-            # ROI
+            # ROI (height * 0.1 작을 수록 인식 범위 확대)
             roi_vertices = [
                 (0, height),
                 (int(width * 0.1), int(height * 0.5)),
