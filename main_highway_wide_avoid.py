@@ -27,13 +27,13 @@ BASE_SPEED = 0.30             # m/s (일반 차선 추종)
 AVOID_SPEED = 0.15            # m/s 
 PASS_SPEED = 0.30             # m/s (대각선 및 직진 통과)
 
-FRONT_STOP_CM = 80.0         # 회피 시작 기준 거리
+FRONT_STOP_CM =   100.0       # 회피 시작 기준 거리
 TURN_OUT_TIME_S = 0.60
-DIAGONAL_TIME_S = 1.5       
+DIAGONAL_TIME_S = 2.0      
 ALIGN_TIME_S = 0.60
 
-TURN_ANGULAR_SPEED = 1.8      # 제자리 회전 각속도
-PASS_DISTANCE_CM = 80.0      
+TURN_ANGULAR_SPEED = 2.2      # 제자리 회전 각속도
+PASS_DISTANCE_CM = 100.0     
 PASS_TIMEOUT_S = PASS_DISTANCE_CM / (PASS_SPEED * 100.0)
 
 CONTROL_PERIOD_S = 0.02
