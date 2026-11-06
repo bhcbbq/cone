@@ -29,7 +29,7 @@ PASS_SPEED = 0.30             # m/s (대각선 및 직진 통과)
 
 FRONT_STOP_CM =   100.0       # 회피 시작 기준 거리
 TURN_OUT_TIME_S = 0.60
-DIAGONAL_TIME_S = 2.0      
+DIAGONAL_TIME_S = 2.5      
 ALIGN_TIME_S = 0.60
 
 TURN_ANGULAR_SPEED = 2.2      # 제자리 회전 각속도
@@ -414,16 +414,30 @@ def main():
         traceback.print_exc()
     finally:
         is_running = False
-        if ugv_serial:
+        print("[종료] 로봇 정지 명령 전송 중...")
+        
+        # [수정] 스레드가 닫히기 전에 메인에서 강제 정지 명령 우선 전송
+        if ugv_serial is not None:
             try:
                 ugv_control.send_driving_command(ugv_serial, 0.0, 0.0)
-                time.sleep(0.1)
-            except: pass
-        if control_thread: control_thread.join(timeout=1.0)
-        if ugv_serial: ugv_control.stop_ugv(ugv_serial)
-        if ultrasonic: ultrasonic.stop()
-        if cap: cap.release()
-        if SHOW_WINDOWS: cv2.destroyAllWindows()
+                time.sleep(0.1)  # 하드웨어가 정지 명령을 받을 수 있도록 짧은 대기
+            except:
+                pass
 
+        if control_thread is not None:
+            control_thread.join(timeout=1.0)
+            
+        if ugv_serial is not None:
+            ugv_control.stop_ugv(ugv_serial)
+            
+        if ultrasonic is not None:
+            ultrasonic.stop()
+        if cap is not None:
+            cap.release()
+        if SHOW_WINDOWS:
+            cv2.destroyAllWindows()
+    # =============== 여기까지 덮어쓰기 ===============
+
+# 이 두 줄은 건드리지 않고 그대로 둡니다.
 if __name__ == "__main__":
     main()

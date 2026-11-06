@@ -1,227 +1,1161 @@
 import cv2
-import os
 import time
-import math
-import traceback
 import threading
+import json
+import math
+import serial
 import numpy as np
 
 import lane_detection_ver2 as lane_detection
 import ugv_control
 
+# ============================================================
+# SETTINGS
+# ============================================================
 
-# ==========================================
-# 기본 설정
-# ==========================================
-BASE_SPEED = 0.3
-FRAME_WIDTH = 640
+BASE_SPEED = 0.30
 
-# 새 영상 결과가 이 시간 이상 갱신되지 않으면 정지
-FRAME_TIMEOUT = 0.5
+# 수동 주행 전용 속도
+# 앱 수동 페이지의 슬라이더(SPEED:0.20 ~ 0.50)로 변경
+MANUAL_SPEED = 0.30
+MANUAL_SPEED_MIN = 0.20
+MANUAL_SPEED_MAX = 0.50
 
-# 카메라 프레임 연속 수신 실패 허용 횟수
-MAX_CAMERA_FAILURES = 3
+# 대각선 주행 시 안쪽 바퀴 속도 비율
+MANUAL_INNER_RATIO = 0.50
 
-# 젯슨 로컬 바탕화면에서는 화면 표시
-# SSH 접속에서는 화면 숨김
-SHOW_WINDOWS = bool(os.environ.get("DISPLAY")) and not bool(
-    os.environ.get("SSH_CONNECTION")
-    or os.environ.get("SSH_CLIENT")
-    or os.environ.get("SSH_TTY")
-)
+# 복귀 제자리 180도 회전 속도
+TURN_SPEED = 0.25
 
-shared_error = 0.0
-shared_speed = 0.0
-shared_frame_time = None
+# 영상 정렬 시 천천히 회전
+ALIGN_TURN_SPEED = 0.18
 
-error_lock = threading.Lock()
+# 제자리 회전 엔코더 기준 거리
+# 실제 180도 회전각을 보면서 조정
+COARSE_TURN_DISTANCE_M = 0.44
+
+# 차선 중심 오차 허용 범위
+# 실제 테스트하면서 조정
+ALIGN_ERROR_THRESHOLD = 15.0
+
+# 몇 프레임 연속으로 중앙에 들어와야
+# 정렬 완료로 판단할지
+ALIGN_STABLE_FRAMES = 8
+
+HC12_PORT = "/dev/ttyTHS1"
+HC12_BAUD = 115200
+
+# UGV 데모 IMU 전도 감지 기준
+TIP_ANGLE_THRESHOLD_DEG = 60.0
+TIP_HOLD_SECONDS = 0.5
+
+
+# ============================================================
+# SHARED STATE
+# ============================================================
+
+# IDLE
+# DRIVE
+# RETURN_TURN
+# RETURN_ALIGN
+# RETURN_DRIVE
+mode = "IDLE"
 
 is_running = True
+
+shared_error = 0.0
+lane_detected = False
+
+# 수동 주행 시 좌/우 바퀴에 보낼 속도
+manual_left_speed = 0.0
+manual_right_speed = 0.0
+
+state_lock = threading.Lock()
+ugv_write_lock = threading.Lock()
+hc12_write_lock = threading.Lock()
+
 ugv_serial = None
-control_failure = None
+hc12_serial = None
 
 
-# ==========================================
-# 백그라운드 모터 제어
-# ==========================================
-def control_thread_task():
-    global is_running
-    global shared_error, shared_speed
-    global control_failure
+# ============================================================
+# ENCODER STATE
+# ============================================================
 
-    previous_error = None
-    previous_frame_time = None
+current_odl = None
+current_odr = None
 
-    angular_z = 0.0
-    frame_dt = None
+# 일반 전진 구간 시작값
+start_odl = None
+start_odr = None
 
-    stale_reported = False
-    last_report = time.monotonic()
+# STOP 후 최종 거리 계산
+stop_pending = False
 
-    print(
-        "[알림] 제어 스레드 시작: 새 영상마다 PD 계산",
-        flush=True,
-    )
+# STOP 후 다시 START했는지 여부
+paused_mission = False
+
+# 지금까지 실제 전진한 총 거리
+mission_outbound_total = 0.0
+
+# RETURN 시 돌아가야 하는 거리
+return_drive_distance = 0.0
+
+# 데모 UGV에는 T2101/T2102 로컬 목표거리 기능이 없으므로
+# 목표거리는 Jetson에서 저장하고 T1001 엔코더로 도달 여부를 판단한다.
+target_distance_m = 0.0
+
+
+# ============================================================
+# RETURN STATE
+# ============================================================
+
+return_turn_start_odl = None
+return_turn_start_odr = None
+
+return_drive_start_odl = None
+return_drive_start_odr = None
+
+align_stable_count = 0
+
+# 복귀 중 STOP 후 재개할 단계 저장
+paused_return_mode = None
+
+lane_lost_printed = False
+
+# 전도 감지 상태
+tip_started_at = None
+tip_latched = False
+
+
+# ============================================================
+# HC12 TX
+# ============================================================
+
+
+def send_hc12(message):
+
+    if hc12_serial is None:
+        return
+
+    if not message.endswith("\n"):
+        message += "\n"
 
     try:
-        while is_running:
-            # 거리 계산 대신 수신 버퍼만 제한적으로 비움
-            ugv_control.clear_feedback_buffer(ugv_serial)
 
-            now = time.monotonic()
+        with hc12_write_lock:
 
-            with error_lock:
-                current_error = shared_error
-                current_speed = shared_speed
-                frame_time = shared_frame_time
+            hc12_serial.write(message.encode("utf-8"))
 
-            stale = (
-                frame_time is None
-                or now - frame_time > FRAME_TIMEOUT
-            )
+            hc12_serial.flush()
 
-            if stale or current_speed <= 0:
-                current_speed = 0.0
-                angular_z = 0.0
+    except Exception as e:
 
-                # 정지 후 재출발 시 D항 정보 초기화
-                previous_error = None
-                previous_frame_time = None
-                frame_dt = None
+        print("[HC12 TX 오류]", e)
 
-                if (
-                    stale
-                    and frame_time is not None
-                    and not stale_reported
-                ):
-                    print(
-                        "[정지] 새 영상 결과 지연. "
-                        "최신 결과를 기다립니다.",
-                        flush=True,
-                    )
-                    stale_reported = True
 
-            else:
-                stale_reported = False
+# ============================================================
+# UGV RAW TX
+# ============================================================
 
-                # 새 영상 결과가 들어왔을 때만 PD 계산
-                new_frame = (
-                    previous_frame_time is None
-                    or frame_time != previous_frame_time
-                )
 
-                if new_frame:
-                    if previous_frame_time is None:
-                        frame_dt = None
-                    else:
-                        frame_dt = (
-                            frame_time - previous_frame_time
+def send_raw_ugv(message):
+
+    if ugv_serial is None:
+        return
+
+    if not message.endswith("\n"):
+        message += "\n"
+
+    try:
+
+        with ugv_write_lock:
+
+            ugv_serial.write(message.encode("utf-8"))
+
+            ugv_serial.flush()
+
+    except Exception as e:
+
+        print("[UGV TX 오류]", e)
+
+
+# ============================================================
+# UGV STOP
+# ============================================================
+
+
+def stop_ugv_now():
+
+    send_raw_ugv('{"T":1,"L":0.0,"R":0.0}')
+
+
+# ============================================================
+# HC-12 COMMAND THREAD
+# ============================================================
+
+
+def hc12_thread_task():
+
+    global mode
+    global MANUAL_SPEED
+    global manual_left_speed
+    global manual_right_speed
+
+    global start_odl
+    global start_odr
+
+    global stop_pending
+    global paused_mission
+
+    global mission_outbound_total
+    global return_drive_distance
+    global target_distance_m
+
+    global return_turn_start_odl
+    global return_turn_start_odr
+
+    global align_stable_count
+    global paused_return_mode
+
+    buffer = ""
+
+    print("[알림] HC-12 명령 수신 스레드 시작")
+
+    while is_running:
+
+        try:
+
+            if hc12_serial is None:
+
+                time.sleep(0.05)
+                continue
+
+            if not hc12_serial.in_waiting:
+
+                time.sleep(0.005)
+                continue
+
+            raw = hc12_serial.read(hc12_serial.in_waiting)
+
+            text = raw.decode("utf-8", errors="ignore")
+
+            for ch in text:
+
+                if ch == "\n":
+
+                    cmd = buffer.strip()
+                    buffer = ""
+
+                    if not cmd:
+                        continue
+
+                    print("[HC12 RX]", cmd)
+
+                    # ==================================================
+                    # EMERGENCY STOP
+                    # ==================================================
+
+                    if cmd == "EMERGENCY_STOP":
+
+                        with state_lock:
+
+                            mode = "IDLE"
+                            stop_pending = False
+                            align_stable_count = 0
+                            paused_return_mode = None
+
+                        send_raw_ugv('{"T":0}')
+
+                        send_hc12("EMERGENCY")
+
+                        print("[비상정지] EMERGENCY STOP")
+
+                        continue
+
+                    # ==================================================
+                    # STOP
+                    # ==================================================
+
+                    if cmd == "STOP":
+
+                        with state_lock:
+
+                            # 복귀 중 STOP이면 현재 복귀 단계를 기억하고 일시정지
+                            if mode in (
+                                "RETURN_TURN",
+                                "RETURN_ALIGN",
+                                "RETURN_DRIVE",
+                            ):
+                                paused_return_mode = mode
+                                stop_pending = False
+                                was_returning = True
+
+                            # 수동조작 중 STOP은 자동주행 거리/재개 상태에 섞지 않음
+                            elif mode == "MANUAL":
+                                paused_return_mode = None
+                                stop_pending = False
+                                was_returning = False
+                                manual_left_speed = 0.0
+                                manual_right_speed = 0.0
+
+                            else:
+                                paused_return_mode = None
+                                stop_pending = True
+                                paused_mission = True
+                                was_returning = False
+
+                            mode = "IDLE"
+                            align_stable_count = 0
+
+                        stop_ugv_now()
+
+                        if was_returning:
+                            send_hc12("RETURN_PAUSED")
+                            print("[RETURN] 일시정지")
+                        else:
+                            print("[정지] UGV STOP")
+                            print("[정지] 최종 엔코더 거리 대기")
+
+                        continue
+
+                    # ==================================================
+                    # SPEED - 수동주행 속도 설정
+                    # 예: SPEED:0.30
+                    # ==================================================
+
+                    if cmd.startswith("SPEED:"):
+
+                        try:
+                            new_speed = float(cmd.split(":", 1)[1])
+
+                        except ValueError:
+                            print("[수동 속도 오류]", cmd)
+                            send_hc12("ERROR:INVALID_SPEED")
+                            continue
+
+                        if not (MANUAL_SPEED_MIN <= new_speed <= MANUAL_SPEED_MAX):
+                            print("[수동 속도 오류] 범위 초과:", new_speed)
+                            send_hc12("ERROR:INVALID_SPEED")
+                            continue
+
+                        with state_lock:
+                            current_mode = mode
+
+                            # 자율주행/복귀 중에는 속도 변경 차단
+                            if current_mode in (
+                                "DRIVE",
+                                "RETURN_TURN",
+                                "RETURN_ALIGN",
+                                "RETURN_DRIVE",
+                            ):
+                                speed_blocked = True
+                            else:
+                                speed_blocked = False
+                                MANUAL_SPEED = new_speed
+
+                        if speed_blocked:
+                            send_hc12("MANUAL_BLOCKED")
+                            print("[수동 속도] 자율주행/복귀 중 변경 차단")
+                        else:
+                            send_hc12(f"SPEED:{MANUAL_SPEED:.2f}")
+                            print("[수동 속도]", f"{MANUAL_SPEED:.2f}")
+
+                        continue
+
+                    # ==================================================
+                    # MANUAL - 수동 8방향 주행
+                    # ==================================================
+
+                    if cmd.startswith("MANUAL:"):
+
+                        direction = cmd.split(":", 1)[1].strip().upper()
+
+                        with state_lock:
+                            current_mode = mode
+
+                        # 자동주행/복귀 중에는 수동조작 금지
+                        if current_mode in (
+                            "DRIVE",
+                            "RETURN_TURN",
+                            "RETURN_ALIGN",
+                            "RETURN_DRIVE",
+                        ):
+                            send_hc12("MANUAL_BLOCKED")
+                            print("[수동] 자율주행/복귀 중 명령 차단:", direction)
+                            continue
+
+                        # 방향 버튼에서 손을 뗐을 때
+                        if direction == "STOP":
+
+                            with state_lock:
+                                manual_left_speed = 0.0
+                                manual_right_speed = 0.0
+
+                                if mode == "MANUAL":
+                                    mode = "IDLE"
+
+                            stop_ugv_now()
+                            send_hc12("MANUAL_STOPPED")
+                            print("[수동] STOP")
+                            continue
+
+                        speed = MANUAL_SPEED
+                        inner = speed * MANUAL_INNER_RATIO
+
+                        manual_map = {
+                            "FORWARD": (
+                                speed,
+                                speed,
+                            ),
+                            "FORWARD_LEFT": (
+                                inner,
+                                speed,
+                            ),
+                            "FORWARD_RIGHT": (
+                                speed,
+                                inner,
+                            ),
+                            "LEFT": (
+                                -speed,
+                                speed,
+                            ),
+                            "RIGHT": (
+                                speed,
+                                -speed,
+                            ),
+                            "BACKWARD": (
+                                -speed,
+                                -speed,
+                            ),
+                            "BACKWARD_LEFT": (
+                                -inner,
+                                -speed,
+                            ),
+                            "BACKWARD_RIGHT": (
+                                -speed,
+                                -inner,
+                            ),
+                        }
+
+                        wheel_speed = manual_map.get(direction)
+
+                        if wheel_speed is None:
+                            print("[수동 방향 오류]", direction)
+                            send_hc12("ERROR:INVALID_MANUAL")
+                            continue
+
+                        left_speed, right_speed = wheel_speed
+
+                        with state_lock:
+                            manual_left_speed = left_speed
+                            manual_right_speed = right_speed
+                            mode = "MANUAL"
+
+                        send_hc12(f"MANUAL:{direction}")
+
+                        print(
+                            "[수동]",
+                            direction,
+                            "L=",
+                            f"{left_speed:.2f}",
+                            "R=",
+                            f"{right_speed:.2f}",
                         )
 
-                    # 첫 영상은 previous_error=None이므로
-                    # ugv_control에서 D항을 0으로 처리.
-                    # 이때 1.0은 함수 호출용 값임.
-                    angular_z = ugv_control.calculate_pid(
-                        current_error,
-                        previous_error,
-                        (
-                            frame_dt
-                            if frame_dt is not None
-                            else 1.0
-                        ),
+                        continue
+
+                    # ==================================================
+                    # TARGET
+                    # ==================================================
+
+                    if cmd.startswith("TARGET:"):
+
+                        try:
+
+                            distance = float(cmd.split(":", 1)[1])
+
+                            if distance <= 0:
+
+                                print("[오류] INVALID TARGET")
+
+                                send_hc12("ERROR:INVALID_TARGET")
+
+                                continue
+
+                            with state_lock:
+
+                                if not paused_mission:
+
+                                    mission_outbound_total = 0.0
+                                    return_drive_distance = 0.0
+
+                                # 데모 UGV에는 T2101이 없으므로 Jetson이 목표거리 저장
+                                target_distance_m = distance
+
+                                start_odl = None
+                                start_odr = None
+
+                                stop_pending = False
+
+                            send_hc12(f"TARGET:{distance:.2f}")
+
+                            print("[목표거리]", f"{distance:.2f} m")
+
+                        except ValueError:
+
+                            print("[오류] INVALID TARGET:", cmd)
+
+                            send_hc12("ERROR:INVALID_TARGET")
+
+                        continue
+
+                    # ==================================================
+                    # START
+                    # ==================================================
+
+                    if cmd == "START":
+
+                        with state_lock:
+
+                            mode = "DRIVE"
+                            stop_pending = False
+                            align_stable_count = 0
+
+                        send_hc12("DRIVING")
+
+                        print("[주행] START")
+
+                        print("[주행] 카메라 차선추종 시작")
+
+                        continue
+
+                    # ==================================================
+                    # RETURN
+                    # ==================================================
+
+                    if cmd == "RETURN":
+
+                        stop_ugv_now()
+
+                        time.sleep(0.2)
+
+                        with state_lock:
+
+                            if current_odl is None or current_odr is None:
+
+                                print("[RETURN 오류] 엔코더 데이터 없음")
+
+                                send_hc12("RETURN_ERROR:NO_ODOM")
+
+                                continue
+
+                            if return_drive_distance <= 0:
+
+                                print("[RETURN 오류] 저장된 복귀거리 없음")
+
+                                send_hc12("RETURN_ERROR:NO_DISTANCE")
+
+                                continue
+
+                            return_turn_start_odl = current_odl
+
+                            return_turn_start_odr = current_odr
+
+                            align_stable_count = 0
+                            paused_return_mode = None
+
+                            mode = "RETURN_TURN"
+
+                            stop_pending = False
+
+                        send_hc12("RETURNING")
+
+                        print("[RETURN] 대략적인 180도 회전 시작")
+
+                        print("[RETURN] 복귀거리:", f"{return_drive_distance:.2f} m")
+
+                        continue
+
+                    # ==================================================
+                    # RESUME RETURN
+                    # ==================================================
+
+                    if cmd == "RESUME_RETURN":
+
+                        with state_lock:
+
+                            if paused_return_mode is None:
+
+                                print("[RETURN] 일시정지된 복귀 없음")
+
+                                send_hc12("RETURN_ERROR:NO_PAUSED_RETURN")
+
+                                continue
+
+                            mode = paused_return_mode
+                            paused_return_mode = None
+                            stop_pending = False
+
+                        send_hc12("RETURNING")
+
+                        print("[RETURN] 복귀 재개:", mode)
+
+                        continue
+
+                    # ==================================================
+                    # RESET
+                    # ==================================================
+
+                    if cmd == "RESET_DISTANCE":
+
+                        with state_lock:
+
+                            start_odl = None
+                            start_odr = None
+
+                            mission_outbound_total = 0.0
+                            return_drive_distance = 0.0
+                            target_distance_m = 0.0
+
+                            paused_mission = False
+                            align_stable_count = 0
+                            paused_return_mode = None
+
+                        send_hc12("DISTANCE:0.00")
+
+                        print("[거리] RESET")
+
+                        continue
+
+                    print("[HC12] UNKNOWN COMMAND:", cmd)
+
+                elif ch != "\r":
+
+                    buffer += ch
+
+        except Exception as e:
+
+            print("[HC12 RX 오류]", e)
+
+            time.sleep(0.05)
+
+
+# ============================================================
+# UGV TELEMETRY THREAD
+# ============================================================
+
+
+def ugv_receive_thread_task():
+
+    global mode
+
+    global current_odl
+    global current_odr
+
+    global start_odl
+    global start_odr
+
+    global stop_pending
+    global paused_mission
+
+    global mission_outbound_total
+    global return_drive_distance
+    global target_distance_m
+
+    global tip_started_at
+    global tip_latched
+
+    global return_drive_start_odl
+    global return_drive_start_odr
+    global paused_return_mode
+
+    print("[알림] UGV 수신 스레드 시작")
+
+    while is_running:
+
+        try:
+
+            if ugv_serial is None:
+
+                time.sleep(0.05)
+                continue
+
+            if not ugv_serial.in_waiting:
+
+                time.sleep(0.005)
+                continue
+
+            line = ugv_serial.readline().decode("utf-8", errors="ignore").strip()
+
+            if not line:
+                continue
+
+            print("[UGV RX]", line)
+
+            # ========================================================
+            # UGV DEMO T1001
+            # - odl / odr: meter
+            # - r / p / y: radian
+            # - ax / ay / az: IMU acceleration
+            # - v: battery voltage
+            # ========================================================
+
+            if line.startswith('{"T":1001'):
+
+                try:
+
+                    data = json.loads(line)
+
+                    odl = float(data["odl"])
+                    odr = float(data["odr"])
+
+                    # 데모 IMU roll / pitch는 radian
+                    roll = float(data.get("r", 0.0))
+                    pitch = float(data.get("p", 0.0))
+
+                except Exception as e:
+
+                    print("[T1001 오류]", e)
+
+                    continue
+
+                # =====================================================
+                # IMU 전도 감지
+                # 60도 이상 기울어진 상태가 0.5초 지속되면 정지
+                # =====================================================
+
+                roll_deg = abs(math.degrees(roll))
+                pitch_deg = abs(math.degrees(pitch))
+                tipped_now = (
+                    roll_deg >= TIP_ANGLE_THRESHOLD_DEG
+                    or pitch_deg >= TIP_ANGLE_THRESHOLD_DEG
+                )
+
+                if tipped_now:
+
+                    if tip_started_at is None:
+                        tip_started_at = time.time()
+
+                    elif (
+                        not tip_latched
+                        and time.time() - tip_started_at >= TIP_HOLD_SECONDS
+                    ):
+
+                        tip_latched = True
+
+                        with state_lock:
+                            mode = "IDLE"
+                            stop_pending = False
+                            paused_return_mode = None
+
+                        stop_ugv_now()
+
+                        # 기존 앱에서 즉시 정지 상태로 처리할 수 있도록 EMERGENCY도 전송
+                        send_hc12("TIPPED")
+                        send_hc12("EMERGENCY")
+
+                        print(
+                            "[전도감지] UGV STOP",
+                            f"roll={roll_deg:.1f}",
+                            f"pitch={pitch_deg:.1f}",
+                        )
+
+                else:
+
+                    tip_started_at = None
+                    tip_latched = False
+
+                with state_lock:
+
+                    current_odl = odl
+                    current_odr = odr
+
+                    current_mode = mode
+
+                    # =================================================
+                    # 일반 DRIVE / STOP 거리 계산
+                    # 데모 odl/odr는 이미 meter이므로 /100 하지 않음
+                    # =================================================
+
+                    if current_mode in ("DRIVE", "IDLE"):
+
+                        if start_odl is None:
+                            start_odl = odl
+
+                        if start_odr is None:
+                            start_odr = odr
+
+                        delta_l = odl - start_odl
+                        delta_r = odr - start_odr
+
+                        segment_distance = max(0.0, (delta_l + delta_r) / 2.0)
+
+                        if current_mode == "DRIVE":
+
+                            send_hc12(f"DISTANCE:{segment_distance:.2f}")
+
+                            # 데모 UGV에는 T2102가 없으므로
+                            # Jetson이 목표거리 도달을 직접 판단한다.
+                            if (
+                                target_distance_m > 0.0
+                                and segment_distance >= target_distance_m
+                            ):
+
+                                mode = "IDLE"
+                                stop_pending = False
+
+                                stop_ugv_now()
+
+                                mission_outbound_total += segment_distance
+                                return_drive_distance = mission_outbound_total
+                                paused_mission = False
+
+                                send_hc12(f"DISTANCE:{segment_distance:.2f}")
+                                send_hc12("ARRIVED")
+
+                                print(
+                                    "[도착] 마지막 구간:",
+                                    f"{segment_distance:.2f} m",
+                                )
+                                print(
+                                    "[도착] RETURN 저장거리:",
+                                    f"{return_drive_distance:.2f} m",
+                                )
+                                print("[도착] ARRIVED - UGV STOP")
+
+                        elif stop_pending:
+
+                            mission_outbound_total += segment_distance
+
+                            return_drive_distance = mission_outbound_total
+
+                            send_hc12(f"DISTANCE:{segment_distance:.2f}")
+
+                            send_hc12("STOPPED")
+
+                            print("[STOP 최종거리]", f"{segment_distance:.2f} m")
+
+                            print("[누적 전진거리]", f"{mission_outbound_total:.2f} m")
+
+                            stop_pending = False
+
+                    # =================================================
+                    # RETURN_TURN
+                    # 기존 엔코더 회전 로직 그대로 유지
+                    # 데모 odl/odr는 이미 meter이므로 /100 하지 않음
+                    # =================================================
+
+                    if current_mode == "RETURN_TURN":
+
+                        if (
+                            return_turn_start_odl is not None
+                            and return_turn_start_odr is not None
+                        ):
+
+                            left_m = abs(odl - return_turn_start_odl)
+
+                            right_m = abs(odr - return_turn_start_odr)
+
+                            turn_distance = (left_m + right_m) / 2.0
+
+                            print(
+                                "[RETURN 회전]",
+                                f"{turn_distance:.2f}",
+                                "/",
+                                f"{COARSE_TURN_DISTANCE_M:.2f} m",
+                            )
+
+                            if turn_distance >= COARSE_TURN_DISTANCE_M:
+
+                                stop_ugv_now()
+
+                                mode = "RETURN_ALIGN"
+
+                                print("[RETURN] 대략적인 회전 완료")
+
+                                print("[RETURN] 영상처리 차선 정렬 시작")
+
+                    # =================================================
+                    # RETURN_DRIVE
+                    # 데모 odl/odr는 이미 meter이므로 /100 하지 않음
+                    # =================================================
+
+                    elif current_mode == "RETURN_DRIVE":
+
+                        if (
+                            return_drive_start_odl is not None
+                            and return_drive_start_odr is not None
+                        ):
+
+                            left_m = abs(odl - return_drive_start_odl)
+
+                            right_m = abs(odr - return_drive_start_odr)
+
+                            returned_m = (left_m + right_m) / 2.0
+
+                            print(
+                                "[RETURN 거리]",
+                                f"{returned_m:.2f}",
+                                "/",
+                                f"{return_drive_distance:.2f} m",
+                            )
+
+                            if returned_m >= return_drive_distance:
+
+                                mode = "IDLE"
+
+                                stop_ugv_now()
+
+                                send_hc12("RETURNED")
+
+                                paused_mission = False
+                                paused_return_mode = None
+
+                                print("[RETURN] 복귀 완료")
+
+        except Exception as e:
+
+            print("[UGV RX 오류]", e)
+
+            time.sleep(0.05)
+
+
+# ============================================================
+# MOTOR CONTROL THREAD
+# ============================================================
+
+
+def control_thread_task():
+
+    global lane_lost_printed
+
+    global align_stable_count
+
+    global mode
+
+    global return_drive_start_odl
+    global return_drive_start_odr
+
+    previous_error = 0.0
+
+    last_time = time.time()
+
+    last_mode = None
+
+    print("[알림] 모터 제어 스레드 시작")
+
+    while is_running:
+
+        current_time = time.time()
+
+        dt = current_time - last_time
+
+        if dt <= 0:
+            dt = 0.001
+
+        last_time = current_time
+
+        with state_lock:
+
+            current_mode = mode
+
+            current_error = shared_error
+
+            detected = lane_detected
+
+            current_manual_left = manual_left_speed
+            current_manual_right = manual_right_speed
+
+        if current_mode != last_mode:
+
+            previous_error = current_error
+
+            last_mode = current_mode
+
+        # ============================================================
+        # IDLE
+        # ============================================================
+
+        if current_mode == "IDLE":
+
+            with ugv_write_lock:
+
+                ugv_control.send_driving_command(ugv_serial, 0.0, 0.0)
+
+        # ============================================================
+        # MANUAL
+        # 카메라/PID 없이 좌/우 바퀴 직접 제어
+        # ============================================================
+
+        elif current_mode == "MANUAL":
+
+            send_raw_ugv(
+                '{"T":1,'
+                f'"L":{current_manual_left:.3f},'
+                f'"R":{current_manual_right:.3f}'
+                "}"
+            )
+
+        # ============================================================
+        # RETURN_TURN
+        # ============================================================
+
+        elif current_mode == "RETURN_TURN":
+
+            # 좌우 바퀴를 반대 방향으로 돌려 제자리에서 180도 회전
+            send_raw_ugv('{"T":1,' f'"L":{-TURN_SPEED},' f'"R":{TURN_SPEED}' "}")
+
+        # ============================================================
+        # RETURN_ALIGN
+        #
+        # 엔코더로 대충 반대 방향까지 돈 다음
+        # 카메라로 실제 차선 중심을 맞춤
+        # ============================================================
+
+        elif current_mode == "RETURN_ALIGN":
+
+            # --------------------------------------------------------
+            # 차선 검출 성공
+            # --------------------------------------------------------
+
+            if detected:
+
+                lane_lost_printed = False
+
+                print("[RETURN ALIGN]", "error:", f"{current_error:.2f}")
+
+                # 아직 중심과 차이가 큼
+                if abs(current_error) > ALIGN_ERROR_THRESHOLD:
+
+                    align_stable_count = 0
+
+                    # 같은 방향으로 천천히 계속 회전
+                    send_raw_ugv(
+                        '{"T":1,'
+                        f'"L":{-ALIGN_TURN_SPEED},'
+                        f'"R":{ALIGN_TURN_SPEED}'
+                        "}"
                     )
 
-                    previous_error = current_error
-                    previous_frame_time = frame_time
+                # 중앙에 들어옴
+                else:
 
-                # 같은 영상 결과라면 직전 조향값 유지
+                    stop_ugv_now()
 
-            ugv_control.send_driving_command(
-                ugv_serial,
-                current_speed,
-                angular_z,
-            )
+                    align_stable_count += 1
 
-            # 실제 전송 명령을 1초마다 표시
-            if now - last_report >= 1.0:
-                dt_text = (
-                    f"{frame_dt:.3f}s"
-                    if frame_dt is not None
-                    else "초기화"
+                    print(
+                        "[RETURN ALIGN] 안정화",
+                        align_stable_count,
+                        "/",
+                        ALIGN_STABLE_FRAMES,
+                    )
+
+                    # 일정 프레임 연속으로 중앙
+                    if align_stable_count >= ALIGN_STABLE_FRAMES:
+
+                        with state_lock:
+
+                            # 이 순간부터 복귀거리 측정
+                            return_drive_start_odl = current_odl
+
+                            return_drive_start_odr = current_odr
+
+                            mode = "RETURN_DRIVE"
+
+                            align_stable_count = 0
+
+                        send_hc12("RETURN_DRIVING")
+
+                        print("[RETURN] 영상 정렬 완료")
+
+                        print("[RETURN] 차선추종 복귀 시작")
+
+            # --------------------------------------------------------
+            # 차선 아직 안 보임
+            # --------------------------------------------------------
+
+            else:
+
+                align_stable_count = 0
+
+                # 같은 방향으로 계속 천천히 회전하면서 탐색
+                send_raw_ugv(
+                    '{"T":1,' f'"L":{-ALIGN_TURN_SPEED},' f'"R":{ALIGN_TURN_SPEED}' "}"
                 )
 
-                print(
-                    f"[제어] X={current_speed:.2f}, "
-                    f"Z={angular_z:.3f}, "
-                    f"오차={current_error:.1f}px, "
-                    f"영상간격={dt_text}",
-                    flush=True,
-                )
+                if not lane_lost_printed:
 
-                last_report = now
+                    print("[RETURN ALIGN] 차선 탐색 중...")
 
-            # 명령 전송 간격
-            time.sleep(0.02)
+                    lane_lost_printed = True
 
-    except Exception as exc:
-        control_failure = (
-            f"{type(exc).__name__}: {exc}"
-        )
+        # ============================================================
+        # DRIVE / RETURN_DRIVE
+        # ============================================================
 
-        print(
-            "[에러] 제어 스레드 중단: "
-            f"{control_failure}",
-            flush=True,
-        )
-        traceback.print_exc()
+        elif current_mode in ("DRIVE", "RETURN_DRIVE"):
 
-        with error_lock:
-            shared_error = 0.0
-            shared_speed = 0.0
+            if detected:
 
-        is_running = False
+                angular_z = ugv_control.calculate_pid(current_error, previous_error, dt)
 
-    finally:
-        # 메인이 카메라에서 대기하더라도 정지를 먼저 시도
-        try:
-            ugv_control.send_driving_command(
-                ugv_serial,
-                0.0,
-                0.0,
-            )
+                previous_error = current_error
 
-        except Exception as exc:
-            print(
-                "[에러] 제어 스레드 정지 명령 "
-                f"전송 실패: {exc}",
-                flush=True,
-            )
+                with ugv_write_lock:
+
+                    ugv_control.send_driving_command(ugv_serial, BASE_SPEED, angular_z)
+
+                lane_lost_printed = False
+
+            else:
+
+                with ugv_write_lock:
+
+                    ugv_control.send_driving_command(ugv_serial, 0.0, 0.0)
+
+                if not lane_lost_printed:
+
+                    print("[안전정지] 차선을 찾지 못했습니다.")
+
+                    send_hc12("LANE_LOST")
+
+                    lane_lost_printed = True
+
+        time.sleep(0.02)
 
 
-# ==========================================
-# 카메라 설정 — main_ver1과 동일
-# ==========================================
+# ============================================================
+# CAMERA
+# ============================================================
+
+
 def gstreamer_pipeline(
     sensor_id=0,
-    capture_width=1640,
-    capture_height=1232,
-    display_width=820,
-    display_height=616,
+    capture_width=1280,
+    capture_height=720,
+    display_width=640,
+    display_height=360,
     framerate=30,
     flip_method=0,
 ):
+
     return (
         "nvarguscamerasrc sensor-id=%d ! "
         "video/x-raw(memory:NVMM), "
-        "width=(int)%d, height=(int)%d, "
-        "format=(string)NV12, "
+        "width=(int)%d, "
+        "height=(int)%d, "
         "framerate=(fraction)%d/1 ! "
         "nvvidconv flip-method=%d ! "
-        "video/x-raw, width=(int)%d, "
-        "height=(int)%d, format=(string)BGRx ! "
+        "video/x-raw, "
+        "width=(int)%d, "
+        "height=(int)%d, "
+        "format=(string)BGRx ! "
         "videoconvert ! "
-        "video/x-raw, format=(string)BGR ! "
-        "appsink drop=true max-buffers=1 sync=false"
+        "video/x-raw, "
+        "format=(string)BGR ! "
+        "appsink"
         % (
             sensor_id,
             capture_width,
@@ -234,334 +1168,198 @@ def gstreamer_pipeline(
     )
 
 
-# ==========================================
-# 차선인식 처리 — lane_detection_ver2 사용
-# ==========================================
-def process_lane_frame(frame, tracker, now):
-    """ver2의 기존 처리 순서대로 함수를 호출합니다."""
-    target_height = max(
-        2,
-        round(
-            frame.shape[0]
-            * FRAME_WIDTH
-            / frame.shape[1]
-        ),
-    )
+# ============================================================
+# MAIN
+# ============================================================
 
-    frame = cv2.resize(
-        frame,
-        (FRAME_WIDTH, target_height),
-    )
-
-    # 전체 Canny와 차선 검출용 에지
-    raw_edges, edges = lane_detection.lane_edges(frame)
-
-    # ver2 차선 추적
-    pair, status = tracker.update(
-        edges,
-        now,
-    )
-
-    # 결과 영상과 조향 오차 계산
-    result_image, error, is_detected = (
-        lane_detection.draw_result(
-            frame.copy(),
-            pair,
-            status,
-        )
-    )
-
-    return (
-        error,
-        result_image,
-        is_detected,
-        raw_edges,
-        edges,
-        status,
-    )
-
-
-# ==========================================
-# 메인 실행
-# ==========================================
-def main():
-    global ugv_serial, is_running
-    global shared_error, shared_speed
-    global shared_frame_time, control_failure
-
-    is_running = True
-    control_failure = None
-
-    with error_lock:
-        shared_error = 0.0
-        shared_speed = 0.0
-        shared_frame_time = None
-
-    cap = None
-    control_thread = None
-
-    exit_reason = "초기화 중 종료"
-
-    window_name = "UGV - ver2 Lane Tracking"
-    edge_window_name = "Canny - Raw | Lane ROI"
+if __name__ == "__main__":
 
     try:
+
+        # ============================================================
+        # UGV
+        # ============================================================
+
+        print("[알림] UGV 연결 중...")
+
         ugv_serial = ugv_control.init_ugv()
 
         if not ugv_serial:
-            exit_reason = (
-                "UGV02 연결 실패. 포트를 확인하세요."
-            )
-            return
 
-        # 카메라 초기화 전 정지 명령
-        ugv_control.send_driving_command(
-            ugv_serial,
-            0.0,
-            0.0,
-        )
+            print("[종료] UGV02 연결 실패")
 
-        print(
-            "[알림] IMX219 CSI 카메라 초기화 중",
-            flush=True,
-        )
+            raise SystemExit
 
-        cap = cv2.VideoCapture(
-            gstreamer_pipeline(flip_method=0),
-            cv2.CAP_GSTREAMER,
-        )
+        print("[알림] UGV 연결 완료")
+
+        # ============================================================
+        # HC12
+        # ============================================================
+
+        print("[알림] HC-12 연결 중...")
+
+        hc12_serial = serial.Serial(HC12_PORT, HC12_BAUD, timeout=0.05)
+
+        print("[알림] HC12 연결:", HC12_PORT, HC12_BAUD)
+
+        # ============================================================
+        # CAMERA
+        # ============================================================
+
+        print("[알림] IMX219 CSI 카메라 초기화 중...")
+
+        pipeline = gstreamer_pipeline(flip_method=0)
+
+        cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
 
         if not cap.isOpened():
-            exit_reason = "카메라를 열 수 없습니다."
-            return
 
-        # 차선과 차선 폭을 기억하도록 한 번만 생성
-        tracker = lane_detection.LaneTracker()
+            print("[에러] 카메라를 열 수 없습니다.")
 
-        if SHOW_WINDOWS:
-            cv2.namedWindow(window_name)
-            cv2.namedWindow(edge_window_name)
+            stop_ugv_now()
 
-        control_thread = threading.Thread(
-            target=control_thread_task,
-            daemon=True,
-        )
+            raise SystemExit
+
+        print("[알림] 카메라 연결 완료")
+
+        # ver2는 이전 차선과 폭을 기억하므로 반복문 밖에서 한 번 생성
+        lane_tracker = lane_detection.LaneTracker()
+        previous_lane_mode = None
+
+        # ============================================================
+        # THREADS
+        # ============================================================
+
+        hc12_thread = threading.Thread(target=hc12_thread_task, daemon=True)
+
+        ugv_rx_thread = threading.Thread(target=ugv_receive_thread_task, daemon=True)
+
+        control_thread = threading.Thread(target=control_thread_task, daemon=True)
+
+        hc12_thread.start()
+        ugv_rx_thread.start()
         control_thread.start()
 
-        print(
-            "[알림] ver2 차선 추적 시작",
-            flush=True,
-        )
-        print(
-            f"[알림] 기본 속도={BASE_SPEED}, "
-            f"화면 표시={SHOW_WINDOWS}",
-            flush=True,
-        )
-        print(
-            "[알림] 종료: Ctrl+C 또는 "
-            "영상 창에서 Q / Esc",
-            flush=True,
-        )
+        print()
+        print("======================================")
+        print(" Future Makers Smart Cone READY")
+        print("======================================")
+        print("[상태] IDLE")
+        print("[알림] 앱 START 전에는 UGV가 움직이지 않습니다.")
+        print()
 
-        failure_count = 0
-        report_time = time.monotonic()
+        # ============================================================
+        # CAMERA LOOP
+        # ============================================================
 
-        while is_running:
-            if not cap.isOpened():
-                exit_reason = (
-                    "실행 중 카메라 연결이 닫혔습니다."
-                )
-                break
-
-            # 영상 읽기 시작 시각을 기록.
-            # PD 시간 계산과 오래된 영상 판단에 사용.
-            frame_started = time.monotonic()
+        while cap.isOpened():
 
             ret, frame = cap.read()
 
-            if (
-                not ret
-                or frame is None
-                or frame.size == 0
-            ):
-                with error_lock:
-                    shared_error = 0.0
-                    shared_speed = 0.0
-                    shared_frame_time = None
+            if not ret:
 
-                tracker.reset()
-                failure_count += 1
+                print("[경고] 카메라 영상 수신 실패")
 
-                print(
-                    "[경고] 카메라 프레임 수신 실패 "
-                    f"({failure_count}/{MAX_CAMERA_FAILURES}). "
-                    "정지 상태.",
-                    flush=True,
-                )
+                with state_lock:
 
-                if failure_count >= MAX_CAMERA_FAILURES:
-                    exit_reason = (
-                        "카메라 프레임 연속 수신 실패"
-                    )
-                    break
+                    mode = "IDLE"
 
-                time.sleep(0.05)
-                continue
+                stop_ugv_now()
 
-            failure_count = 0
+                send_hc12("CAMERA_ERROR")
 
-            (
-                error,
-                result_image,
-                is_detected,
-                raw_edges,
-                edges,
-                status,
-            ) = process_lane_frame(
-                frame,
-                tracker,
-                frame_started,
+                break
+
+            # 복귀 회전/정렬 진입 시 이전 방향의 차선 기억 초기화
+            with state_lock:
+                vision_mode = mode
+
+            if vision_mode != previous_lane_mode:
+                if vision_mode in ("RETURN_TURN", "RETURN_ALIGN"):
+                    lane_tracker.reset()
+                previous_lane_mode = vision_mode
+
+            # 영상 전처리, 색상 필터와 ROI는 ver2 모듈에서 처리
+            raw_edges, edges = lane_detection.lane_edges(frame)
+
+            # 추적기를 유지하여 이전 차선 위치와 측정한 차선 폭 활용
+            pair, lane_status = lane_tracker.update(
+                edges, time.monotonic()
             )
 
-            if not math.isfinite(error):
-                raise ValueError(
-                    "차선 오차가 유효하지 않습니다: "
-                    f"{error}"
-                )
-
-            with error_lock:
-                if not is_running:
-                    break
-
-                shared_error = float(error)
-                shared_speed = (
-                    BASE_SPEED
-                    if is_detected
-                    else 0.0
-                )
-                shared_frame_time = frame_started
-
-            # SSH에서도 확인할 수 있도록 상태 출력
-            now = time.monotonic()
-
-            if now - report_time >= 1.0:
-                usable = (
-                    bool(is_detected)
-                    and now - frame_started <= FRAME_TIMEOUT
-                )
-
-                print(
-                    f"[상태] 차선={status}, "
-                    f"오차={error:.1f}px, "
-                    f"영상 처리={now - frame_started:.3f}s, "
-                    f"주행허용={usable}",
-                    flush=True,
-                )
-
-                report_time = now
-
-            if SHOW_WINDOWS:
-                edge_view = cv2.cvtColor(
-                    np.hstack([
-                        raw_edges,
-                        edges,
-                    ]),
-                    cv2.COLOR_GRAY2BGR,
-                )
-
-                for text, x in (
-                    ("RAW CANNY", 12),
-                    (
-                        "LANE ROI",
-                        raw_edges.shape[1] + 12,
-                    ),
-                ):
-                    cv2.putText(
-                        edge_view,
-                        text,
-                        (x, 25),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6,
-                        (0, 255, 255),
-                        1,
-                    )
-
-                # 원본 영상 + 차선인식 결과
-                cv2.imshow(
-                    window_name,
-                    result_image,
-                )
-
-                # 전체 Canny + 차선 검출용 ROI 에지
-                cv2.imshow(
-                    edge_window_name,
-                    edge_view,
-                )
-
-                key = cv2.waitKey(1) & 0xFF
-
-                if key in (
-                    ord("q"),
-                    ord("Q"),
-                    27,
-                ):
-                    exit_reason = "사용자 종료 키 입력"
-                    break
-
-                # 창 상태 조회로 종료하지 않음.
-                # 종료는 Q / Esc / Ctrl+C 사용.
-
-        if control_failure is not None:
-            exit_reason = (
-                f"제어 오류: {control_failure}"
+            # 주의: 기존 calculate_steering과 반환 순서가 다름
+            result_image, error, is_detected = lane_detection.draw_result(
+                frame.copy(), pair, lane_status
             )
+
+            with state_lock:
+
+                shared_error = error
+
+                lane_detected = is_detected
+
+            # SSH 환경에서는 GUI 끔
+            #
+            # 필요하면:
+            #
+            # cv2.imshow(
+            #     "Smart Cone",
+            #     result_image
+            # )
+            #
+            # if cv2.waitKey(1) & 0xFF == ord("q"):
+            #     break
 
     except KeyboardInterrupt:
-        exit_reason = "Ctrl+C 종료"
 
-    except Exception as exc:
-        exit_reason = (
-            f"{type(exc).__name__}: {exc}"
-        )
+        print()
 
-        print(
-            "[에러] 메인 실행 중 예외 발생",
-            flush=True,
-        )
-        traceback.print_exc()
+        print("[알림] Ctrl+C 감지")
+
+    except Exception as e:
+
+        print("[MAIN 오류]", e)
 
     finally:
-        with error_lock:
-            shared_error = 0.0
-            shared_speed = 0.0
-            shared_frame_time = None
+
+        print("[알림] 시스템 안전 종료")
 
         is_running = False
 
-        # 제어 스레드에서 정지 명령을 먼저 전송
-        if control_thread is not None:
-            control_thread.join()
+        try:
 
-        # 최종 정지 명령 후 시리얼 포트 닫기
-        ugv_control.stop_ugv(ugv_serial)
-        ugv_serial = None
+            stop_ugv_now()
 
-        print(
-            f"[종료 사유] {exit_reason}",
-            flush=True,
-        )
+        except Exception:
+            pass
 
-        if cap is not None:
-            cap.release()
+        try:
 
-        if SHOW_WINDOWS:
-            cv2.destroyAllWindows()
+            if "cap" in locals():
 
-        print(
-            "[알림] 시스템 종료 완료",
-            flush=True,
-        )
+                cap.release()
 
+        except Exception:
+            pass
 
-if __name__ == "__main__":
-    main()
+        try:
+
+            if hc12_serial:
+
+                hc12_serial.close()
+
+        except Exception:
+            pass
+
+        try:
+
+            if ugv_serial:
+
+                ugv_serial.close()
+
+        except Exception:
+            pass
+
+        cv2.destroyAllWindows()
+
+        print("[종료] 완료")
