@@ -33,7 +33,7 @@ FRONT_SAFE_CM = 70.0          # 회전 시 전방이 70cm 이상 확보되어야
 SIDE_DANGER_CM = 30.0         # 측면 30cm 미만일 경우 너무 가까워 임시 정지
 SIDE_CLEAR_CM = 50.0          # 측면 50cm 이상 멀어지면 장애물을 통과했다고 판단
 
-ALIGN_TIME_S = 0.9
+ALIGN_TIME_S = 1.6
 TURN_ANGULAR_SPEED = 2.4      # 제자리 회전 각속도
 
 CONTROL_PERIOD_S = 0.02
