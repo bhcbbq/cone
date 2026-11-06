@@ -48,7 +48,8 @@ SHOW_WINDOWS = bool(os.environ.get("DISPLAY")) and not bool(
 # FSM State & Direction
 # ============================================================
 class State(Enum):
-    LANE_FOLLOWING = auto()    
+    LANE_FOLLOWING = auto() 
+    AVOID_START_PAUSE = auto() # [추가] 장애물 발견 직후 브레이크(급정거) 상태  
     AVOID_TURN_OUT = auto()    
     AVOID_PAUSE = auto()       # [추가] 회전 후 센서값 안정화를 위해 잠시 멈추는 상태
     AVOID_DIAGONAL = auto()    
@@ -263,12 +264,24 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
                 avoid_direction = vision_dir
                 
             print(f"\n[OBSTACLE DETECTED] Front: {front_d:.1f}cm -> Avoid Dir: {avoid_direction.name}", flush=True)
-            transition(State.AVOID_TURN_OUT)
+            transition(State.AVOID_START_PAUSE)
         elif not is_detected:
             force_stop()
         else:
             set_command(BASE_SPEED, None, error=error)
         return
+
+
+# [추가] 1-1. 장애물 발견 직후 0.5초간 완전 정지 (관성 제동)
+    if state == State.AVOID_START_PAUSE:
+        force_stop()
+        if state_elapsed() >= 0.5: # 0.5초 동안 멈춰서 브레이크
+            transition(State.AVOID_TURN_OUT) # 그 다음에 제자리 회전 시작
+        return
+
+
+
+
 
     # 2. 제자리 회전 (시간 제한 폐지, 정면 60cm 클리어 될 때까지 회전)
     if state == State.AVOID_TURN_OUT:
