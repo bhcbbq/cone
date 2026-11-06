@@ -27,14 +27,14 @@ BASE_SPEED = 0.30             # m/s (일반 차선 추종)
 AVOID_SPEED = 0.15            # m/s 
 PASS_SPEED = 0.30             # m/s (대각선 및 직진 통과)
 
-# [수정] 거리 기반 회피 조건 파라미터 추가
+# 거리 기반 회피 조건 파라미터
 FRONT_STOP_CM = 60.0         # 회피 시작 기준 거리 (전방 장애물 인식)
-FRONT_SAFE_CM = 70.0          # [추가] 회전 시 전방이 70cm 이상 확보되어야 회전 완료
-SIDE_DANGER_CM = 30.0         # [추가] 측면 30cm 미만일 경우 너무 가까워 임시 정지
-SIDE_CLEAR_CM = 50.0          # [추가] 측면 50cm 이상 멀어지면 장애물을 통과했다고 판단
+FRONT_SAFE_CM = 70.0          # 회전 시 전방이 70cm 이상 확보되어야 회전 완료
+SIDE_DANGER_CM = 30.0         # 측면 30cm 미만일 경우 너무 가까워 임시 정지
+SIDE_CLEAR_CM = 50.0          # 측면 50cm 이상 멀어지면 장애물을 통과했다고 판단
 
 ALIGN_TIME_S = 0.9
-TURN_ANGULAR_SPEED = 2.4      # 제자리 회전 각속도 (마찰력 극복을 위해 2.2 -> 2.4 상향 권장)
+TURN_ANGULAR_SPEED = 2.4      # 제자리 회전 각속도
 
 CONTROL_PERIOD_S = 0.02
 NO_OBSTACLE = -1.0
@@ -49,9 +49,9 @@ SHOW_WINDOWS = bool(os.environ.get("DISPLAY")) and not bool(
 # ============================================================
 class State(Enum):
     LANE_FOLLOWING = auto() 
-    AVOID_START_PAUSE = auto() # [추가] 장애물 발견 직후 브레이크(급정거) 상태  
+    AVOID_START_PAUSE = auto() # 장애물 발견 직후 브레이크(급정거) 상태  
     AVOID_TURN_OUT = auto()    
-    AVOID_PAUSE = auto()       # [추가] 회전 후 센서값 안정화를 위해 잠시 멈추는 상태
+    AVOID_PAUSE = auto()       # 회전 후 센서값 안정화를 위해 잠시 멈추는 상태
     AVOID_DIAGONAL = auto()    
     AVOID_ALIGN = auto()       
     AVOID_FORWARD = auto()     
@@ -227,7 +227,6 @@ def check_recovery_lane_detection(is_detected):
     global recovery_detect_count
     if is_detected:
         recovery_detect_count += 1
-        # 차선이 3프레임 이상 안정적으로 잡히면 조기 복귀
         if recovery_detect_count >= 3:
             recovery_detect_count = 0
             force_stop()
@@ -241,14 +240,19 @@ def check_recovery_lane_detection(is_detected):
 def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
     global avoid_direction, state, front_obstacle_count, avoid_count, recovery_done_count
 
-    # 1. 차선 추종
+    # 1. 차선 추종 (방어적 비상 정지 적용 완료)
     if state == State.LANE_FOLLOWING:
-        if 0.0 < front_d <= FRONT_STOP_CM:
-            front_obstacle_count += 1
-        else:
-            front_obstacle_count = 0
+        is_front_close = (0.0 < front_d <= FRONT_STOP_CM) or (front_obstacle_count > 0 and front_d < 0)
 
-        if front_obstacle_count >= 3:
+        if is_front_close:
+            front_obstacle_count += 1
+            # 1회만 감지되어도 즉시 모터를 끄고 강제 브레이크
+            force_stop()
+        else:
+            if front_obstacle_count > 0:
+                front_obstacle_count -= 1
+
+        if front_obstacle_count >= 2:
             front_obstacle_count = avoid_count = recovery_done_count = 0
             force_stop()
             
@@ -265,25 +269,22 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
                 
             print(f"\n[OBSTACLE DETECTED] Front: {front_d:.1f}cm -> Avoid Dir: {avoid_direction.name}", flush=True)
             transition(State.AVOID_START_PAUSE)
+            return
+
         elif not is_detected:
             force_stop()
-        else:
+        elif front_obstacle_count == 0:
             set_command(BASE_SPEED, None, error=error)
         return
 
-
-# [추가] 1-1. 장애물 발견 직후 0.5초간 완전 정지 (관성 제동)
+    # 1-1. 장애물 발견 직후 완전 정지 (관성 제거 0.6초)
     if state == State.AVOID_START_PAUSE:
         force_stop()
-        if state_elapsed() >= 0.5: # 0.5초 동안 멈춰서 브레이크
-            transition(State.AVOID_TURN_OUT) # 그 다음에 제자리 회전 시작
+        if state_elapsed() >= 0.6: 
+            transition(State.AVOID_TURN_OUT)
         return
 
-
-
-
-
-    # 2. 제자리 회전 (시간 제한 폐지, 정면 60cm 클리어 될 때까지 회전)
+    # 2. 제자리 회전
     if state == State.AVOID_TURN_OUT:
         set_command(0.0, avoid_direction.value * TURN_ANGULAR_SPEED)
         if front_d >= FRONT_SAFE_CM or front_d < 0:
@@ -291,38 +292,31 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
             transition(State.AVOID_PAUSE)
         return
 
-    # 2-1. 회전 후 잠시 대기 (관성 제동 및 센서 안정화 0.3초)
+    # 2-1. 회전 후 잠시 대기
     if state == State.AVOID_PAUSE:
         force_stop()
         if state_elapsed() >= 0.3:
             transition(State.AVOID_DIAGONAL)
         return
 
-    # 3. 대각선 전진 (측면 센서 실시간 감시 로직)   
-    # 3. 대각선 전진 (측면 센서 실시간 감시 로직)
+    # 3. 대각선 전진
     if state == State.AVOID_DIAGONAL:
         side_d = right_d if avoid_direction == AvoidDirection.LEFT else left_d
         
-        # [수정1] 25cm 미만의 사각지대 값까지 전부 포함하여 35cm 미만이면 무조건 비상 정지
         if 0.0 < side_d < SIDE_DANGER_CM:
             force_stop()
             print(f"[위험] 측면 장애물 초근접! ({side_d:.1f}cm) -> 충돌 방지 대기", flush=True)
-            
-        # [수정2] 50cm 이상 거리가 확실히 찍혔을 때만 통과로 인정
         elif side_d >= SIDE_CLEAR_CM:
             force_stop()
             print(f"[통과] 측면 클리어 ({side_d:.1f}cm) -> 평행 정렬 시작", flush=True)
             transition(State.AVOID_ALIGN)
-            
-        # [수정3] -1(오류/노이즈)이 튀었을 때는 즉시 통과로 처리하지 않고 신중하게 대각선 주행
         elif side_d < 0:
-            set_command(AVOID_SPEED, 0.0) # PASS_SPEED(0.3) 대신 느린 속도(0.15)로 조심스럽게 전진
-            
-        # 35 ~ 50cm 사이 안전 구간
+            set_command(AVOID_SPEED, 0.0)
         else:
             set_command(AVOID_SPEED, 0.0)
         return
-    # 4. 제자리 정렬 (바퀴를 다시 원래 차선 방향과 평행하게 정렬)
+
+    # 4. 제자리 정렬
     if state == State.AVOID_ALIGN:
         set_command(0.0, -avoid_direction.value * TURN_ANGULAR_SPEED)
         if state_elapsed() >= ALIGN_TIME_S:
@@ -330,7 +324,7 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
             transition(State.AVOID_FORWARD)
         return
 
-    # 5. 직진 통과 (장애물 옆을 완전히 치우치게 지나가기 위해 약 1.2초 직진)
+    # 5. 직진 통과
     if state == State.AVOID_FORWARD:
         set_command(PASS_SPEED, 0.0)
         if state_elapsed() >= 1.2:
@@ -338,11 +332,10 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
             transition(State.RECOVERY_TURN_IN)
         return
 
-    # 6. 복귀 기동 (카메라에 전적으로 의존)
+    # 6. 복귀 기동
     if state == State.RECOVERY_TURN_IN:
         if check_recovery_lane_detection(is_detected): return
         set_command(0.0, -avoid_direction.value * TURN_ANGULAR_SPEED)
-        # 평행 정렬한 만큼 다시 차선 쪽으로 머리를 꺾음
         if state_elapsed() >= ALIGN_TIME_S:
             force_stop()
             transition(State.RECOVERY_DIAGONAL)
@@ -351,9 +344,7 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
     if state == State.RECOVERY_DIAGONAL:
         if check_recovery_lane_detection(is_detected): return
         set_command(PASS_SPEED, 0.0)
-        # 차선이 시야에 포착될 때까지 무한 대각선 전진 (check_recovery_lane_detection이 전환 제어)
         
-        # 만약 시야각 문제로 6초 이상 차선을 못 찾으면 미아 방지 강제 정지
         if state_elapsed() >= 6.0:
             force_stop()
             print("[에러] 타임아웃: 차선을 찾지 못했습니다.", flush=True)
@@ -433,7 +424,6 @@ def main():
     except Exception:
         traceback.print_exc()
     
-    # [수정] 메인 스레드 강제 종료 안전장치 (스레드 먼저 종료 후 확실한 3중 정지)
     finally:
         is_running = False
         print("[종료] 백그라운드 제어 중지 및 모터 강제 정지 중...")
