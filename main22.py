@@ -900,9 +900,6 @@ def ugv_receive_thread_task():
 
                 with state_lock:
 
-                    if mode != "DRIVE":
-                        continue
-
                     mode = "IDLE"
 
                     stop_pending = False
