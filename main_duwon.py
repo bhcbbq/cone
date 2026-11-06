@@ -29,11 +29,11 @@ PASS_SPEED = 0.30             # m/s (대각선 및 직진 통과)
 
 # [수정] 거리 기반 회피 조건 파라미터 추가
 FRONT_STOP_CM = 60.0         # 회피 시작 기준 거리 (전방 장애물 인식)
-FRONT_SAFE_CM = 70.0          # [추가] 회전 시 전방이 60cm 이상 확보되어야 회전 완료
+FRONT_SAFE_CM = 70.0          # [추가] 회전 시 전방이 70cm 이상 확보되어야 회전 완료
 SIDE_DANGER_CM = 35.0         # [추가] 측면 35cm 미만일 경우 너무 가까워 임시 정지
 SIDE_CLEAR_CM = 50.0          # [추가] 측면 50cm 이상 멀어지면 장애물을 통과했다고 판단
 
-ALIGN_TIME_S = 0.60
+ALIGN_TIME_S = 0.9
 TURN_ANGULAR_SPEED = 2.4      # 제자리 회전 각속도 (마찰력 극복을 위해 2.2 -> 2.4 상향 권장)
 
 CONTROL_PERIOD_S = 0.02
@@ -285,26 +285,30 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
             transition(State.AVOID_DIAGONAL)
         return
 
+    # 3. 대각선 전진 (측면 센서 실시간 감시 로직)   
     # 3. 대각선 전진 (측면 센서 실시간 감시 로직)
     if state == State.AVOID_DIAGONAL:
-        # 장애물을 끼고 도는 쪽 센서 확인 (좌측 회피 시 장애물은 우측에 있음)
         side_d = right_d if avoid_direction == AvoidDirection.LEFT else left_d
         
-        # 방수 센서의 불감 영역(25cm 미만)은 노이즈로 간주하여 필터링
-        if 25.0 < side_d < SIDE_DANGER_CM:
-            # 35cm 미만이면 충돌 위험이 있으므로 전진을 멈춤
+        # [수정1] 25cm 미만의 사각지대 값까지 전부 포함하여 35cm 미만이면 무조건 비상 정지
+        if 0.0 < side_d < SIDE_DANGER_CM:
             force_stop()
-            print(f"[경고] 측면 근접 ({side_d:.1f}cm) -> 대기 중...", flush=True)
-        elif side_d >= SIDE_CLEAR_CM or side_d < 0:
-            # 50cm 이상 거리가 벌어지면 완전히 통과했다고 판단
+            print(f"[위험] 측면 장애물 초근접! ({side_d:.1f}cm) -> 충돌 방지 대기", flush=True)
+            
+        # [수정2] 50cm 이상 거리가 확실히 찍혔을 때만 통과로 인정
+        elif side_d >= SIDE_CLEAR_CM:
             force_stop()
             print(f"[통과] 측면 클리어 ({side_d:.1f}cm) -> 평행 정렬 시작", flush=True)
             transition(State.AVOID_ALIGN)
+            
+        # [수정3] -1(오류/노이즈)이 튀었을 때는 즉시 통과로 처리하지 않고 신중하게 대각선 주행
+        elif side_d < 0:
+            set_command(AVOID_SPEED, 0.0) # PASS_SPEED(0.3) 대신 느린 속도(0.15)로 조심스럽게 전진
+            
+        # 35 ~ 50cm 사이 안전 구간
         else:
-            # 35~50cm 사이라면 안전 간격이므로 대각선 주행 유지
-            set_command(PASS_SPEED, 0.0)
+            set_command(AVOID_SPEED, 0.0)
         return
-
     # 4. 제자리 정렬 (바퀴를 다시 원래 차선 방향과 평행하게 정렬)
     if state == State.AVOID_ALIGN:
         set_command(0.0, -avoid_direction.value * TURN_ANGULAR_SPEED)
@@ -313,10 +317,10 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
             transition(State.AVOID_FORWARD)
         return
 
-    # 5. 직진 통과 (장애물 옆을 완전히 치우치게 지나가기 위해 약 0.8초 직진)
+    # 5. 직진 통과 (장애물 옆을 완전히 치우치게 지나가기 위해 약 1.2초 직진)
     if state == State.AVOID_FORWARD:
         set_command(PASS_SPEED, 0.0)
-        if state_elapsed() >= 0.8:
+        if state_elapsed() >= 1.2:
             force_stop()
             transition(State.RECOVERY_TURN_IN)
         return
