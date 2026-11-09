@@ -1203,8 +1203,8 @@ def ugv_receive_thread_task():
                         battery = float(battery_text)
 
                     # IMU yaw를 degree 단위로 통일
-                    # 커스텀 T2100의 "yaw"는 degree로 사용
-                    # 공식 데모 계열의 "y"는 radian으로 보고 degree로 변환
+                    # UGV 코드에서 T2100의 "yaw"는 atan2() 결과를 그대로 보내므로 radian이다.
+                    # "yaw" / "y" 어느 필드로 와도 radian -> degree 변환해서 사용한다.
                     yaw = None
 
                     if '"yaw":' in line:
@@ -1214,7 +1214,7 @@ def ugv_receive_thread_task():
                             .split("}", 1)[0]
                             .strip()
                         )
-                        yaw = float(yaw_text)
+                        yaw = np.degrees(float(yaw_text))
 
                     elif '"y":' in line:
                         yaw_text = (
@@ -1385,7 +1385,7 @@ def ugv_receive_thread_task():
                                 current_yaw - return_turn_last_yaw + 180.0
                             ) % 360.0 - 180.0
 
-                            # 비정상적으로 큰 1회 점프는 센서 오류로 보고 무시
+                            # T2100이 약 50 ms 주기로 오므로 1회 45도 초과 점프만 비정상값으로 무시
                             if abs(yaw_delta) <= 45.0:
                                 return_turn_accum_deg += abs(yaw_delta)
 
