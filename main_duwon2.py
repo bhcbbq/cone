@@ -14,39 +14,151 @@ from ultrasonic_reader import UltrasonicReader
 
 import json
 
-# --- [전역 변수 추가] ---
-shared_yaw = 0.0
-target_yaw = None  # 회전 목표 각도 저장용
+# IMU yaw unit MUST match the firmware output: "deg" or "rad".
+# Original program assumed degrees; retained as default (do not infer from a still image).
+IMU_YAW_UNIT = "deg"
+TURN_ANGLE_DEG = 50.0
+TURN_TOLERANCE_DEG = 2.0
+TURN_KP = 0.035
+TURN_MIN_SPEED = 0.18
+TURN_MAX_SPEED = 0.65   # command units assumed rad/s; verify ugv_control/firmware
+TURN_TIMEOUT_S = 6.0
+IMU_STALE_TIMEOUT_S = 0.35
+IMU_NO_MOTION_TIMEOUT_S = 1.5
+IMU_MIN_MOTION_DEG = 1.0
+IMU_MAX_STEP_DEG = 45.0  # reject discontinuous/reset samples while turning
 
-# --- [IMU 수신 스레드 함수 추가] ---
+imu_lock = threading.Lock()
+shared_yaw = 0.0       # always degrees after input conversion
+shared_yaw_time = None
+shared_yaw_seq = 0
+imu_read_error = None
+turn_context = None
+safety_fault = None
+
+
+def normalize_delta(degrees):
+    return (degrees + 180.0) % 360.0 - 180.0
+
+
+def get_imu_snapshot():
+    with imu_lock:
+        return shared_yaw, shared_yaw_time, shared_yaw_seq
+
+
 def ugv_imu_read_task(ugv_serial):
-    global shared_yaw, is_running
+    global shared_yaw, shared_yaw_time, shared_yaw_seq, imu_read_error
     buffer = ""
     while is_running:
         try:
             waiting = ugv_serial.in_waiting
             if waiting > 0:
-                # 1. 뭉쳐있는 수천 바이트의 데이터를 한 번에 즉시 긁어옴 (병목 제거)
-                raw_data = ugv_serial.read(waiting).decode('utf-8', errors='ignore')
-                buffer += raw_data
-                
-                if '\n' in buffer:
-                    lines = buffer.split('\n')
-                    buffer = lines[-1]  # 잘린 마지막 줄만 다음을 위해 남겨둠
-                    
-                    # 2. 리스트를 뒤에서부터(가장 최신 데이터부터) 거꾸로 확인
-                    for line in reversed(lines[:-1]):
-                        if '"yaw"' in line:
-                            try:
-                                data = json.loads(line.strip())
-                                if "yaw" in data:
-                                    shared_yaw = float(data["yaw"])
-                                    break  # 최신값을 하나 찾았으면 낡은 과거 데이터는 즉시 폐기하고 탈출
-                            except Exception:
-                                continue
-        except Exception:
-            pass
+                buffer += ugv_serial.read(waiting).decode("utf-8", errors="ignore")
+                lines = buffer.split("\n")
+                buffer = lines[-1][-8192:]
+                # Keep only the most recent valid complete packet.
+                for line in reversed(lines[:-1]):
+                    try:
+                        packet = json.loads(line.strip())
+                        if not isinstance(packet, dict) or "yaw" not in packet:
+                            continue
+                        yaw = float(packet["yaw"])
+                        if not math.isfinite(yaw):
+                            continue
+                        if IMU_YAW_UNIT == "rad":
+                            yaw = math.degrees(yaw)
+                        elif IMU_YAW_UNIT != "deg":
+                            raise ValueError("IMU_YAW_UNIT must be deg or rad")
+                        with imu_lock:
+                            shared_yaw = yaw
+                            shared_yaw_time = time.monotonic()
+                            shared_yaw_seq += 1
+                        imu_read_error = None
+                        break
+                    except (ValueError, TypeError, OverflowError):
+                        continue
+        except Exception as exc:
+            imu_read_error = f"{type(exc).__name__}: {exc}"
+            # Missing/stale feedback is stopped by the independent control watchdog.
         time.sleep(0.005)
+
+
+def latch_safety_fault(reason):
+    global safety_fault
+    if safety_fault is None:
+        safety_fault = reason
+        print(f"[SAFETY STOP] {reason}; fix cause and restart", flush=True)
+    force_stop()
+
+
+def reset_turn():
+    global turn_context
+    turn_context = None
+
+
+def turn_watchdog_reason(now):
+    ctx = turn_context
+    if ctx is None:
+        return None
+    _, stamp, _ = get_imu_snapshot()
+    if stamp is None or now - stamp > IMU_STALE_TIMEOUT_S:
+        return "IMU feedback missing/stale"
+    if now - ctx["started"] >= TURN_TIMEOUT_S:
+        return "IMU turn timeout"
+    if now - ctx["last_motion"] >= IMU_NO_MOTION_TIMEOUT_S:
+        return "IMU yaw not changing during turn"
+    return None
+
+
+def run_imu_turn(command_direction, next_state):
+    """Accumulate signed wrapped deltas; stop on reaching OR crossing 50 deg.
+
+    Uses absolute NET rotation, so either yaw sign convention is supported.
+    This does NOT verify that a positive motor command physically turns left:
+    validate AvoidDirection/firmware motor polarity separately before operation.
+    """
+    global turn_context
+    now = time.monotonic()
+    yaw, stamp, seq = get_imu_snapshot()
+    if stamp is None or now - stamp > IMU_STALE_TIMEOUT_S:
+        latch_safety_fault("Cannot start/continue turn without fresh IMU")
+        return
+    if turn_context is None:
+        turn_context = {
+            "started": now, "last_yaw": yaw, "last_seq": seq,
+            "accumulated": 0.0, "motion_anchor": 0.0, "last_motion": now,
+            "direction": command_direction,
+        }
+        print(f"[TURN START] yaw_deg={yaw:.2f}, target={TURN_ANGLE_DEG:.1f}, "
+              f"input_unit={IMU_YAW_UNIT}, command_sign={command_direction}", flush=True)
+    ctx = turn_context
+    if ctx["direction"] != command_direction:
+        latch_safety_fault("Unexpected turn direction change")
+        return
+    if seq != ctx["last_seq"]:
+        delta = normalize_delta(yaw - ctx["last_yaw"])
+        if abs(delta) > IMU_MAX_STEP_DEG:
+            latch_safety_fault(f"IMU discontinuity: {delta:.1f} deg/sample")
+            return
+        ctx["accumulated"] += delta
+        ctx["last_yaw"], ctx["last_seq"] = yaw, seq
+        if abs(ctx["accumulated"] - ctx["motion_anchor"]) >= IMU_MIN_MOTION_DEG:
+            ctx["last_motion"] = now
+            ctx["motion_anchor"] = ctx["accumulated"]
+    progress = abs(ctx["accumulated"])
+    remaining = TURN_ANGLE_DEG - progress
+    if remaining <= TURN_TOLERANCE_DEG:
+        force_stop()
+        print(f"[TURN DONE] net_rotation={ctx['accumulated']:.2f} deg", flush=True)
+        reset_turn()
+        transition(next_state)
+        return
+    reason = turn_watchdog_reason(now)
+    if reason:
+        latch_safety_fault(reason)
+        return
+    angular = min(TURN_MAX_SPEED, max(TURN_MIN_SPEED, TURN_KP * remaining))
+    set_command(0.0, command_direction * angular)
 
 # ============================================================
 # Configuration
@@ -230,19 +342,23 @@ def control_thread_task(ugv_serial):
 
             stale = (f_time is None or now - f_time > FRAME_TIMEOUT)
 
-            if stale or (c_spd <= 0 and override is None):
-                c_spd = 0.0 if override is None else c_spd
-                angular_z = override if override is not None else 0.0
+            reason = turn_watchdog_reason(now)
+            if reason:
+                latch_safety_fault(reason)
+            # Camera stalls must stop overrides too (original code kept turning).
+            if safety_fault is not None or stale:
+                c_spd = angular_z = 0.0
                 previous_error = previous_frame_time = None
-            else:
-                if override is not None:
-                    angular_z = override
-                    previous_error = previous_frame_time = None
-                else:
-                    if previous_frame_time is None or f_time != previous_frame_time:
-                        dt = (f_time - previous_frame_time) if previous_frame_time else 1.0
-                        angular_z = ugv_control.calculate_pid(c_err, previous_error, dt)
-                        previous_error, previous_frame_time = c_err, f_time
+            elif override is not None:
+                angular_z = override
+                previous_error = previous_frame_time = None
+            elif c_spd <= 0:
+                c_spd = angular_z = 0.0
+                previous_error = previous_frame_time = None
+            elif previous_frame_time is None or f_time != previous_frame_time:
+                dt = (f_time - previous_frame_time) if previous_frame_time else 1.0
+                angular_z = ugv_control.calculate_pid(c_err, previous_error, dt)
+                previous_error, previous_frame_time = c_err, f_time
 
             ugv_control.send_driving_command(ugv_serial, c_spd, angular_z)
             time.sleep(CONTROL_PERIOD_S)
@@ -275,7 +391,9 @@ def check_recovery_lane_detection(is_detected):
 
 def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
     global avoid_direction, state, front_obstacle_count, avoid_count, recovery_done_count
-    global shared_yaw, target_yaw  # IMU 제어용 전역 변수 추가
+    if safety_fault is not None:
+        force_stop()
+        return
 
     # 1. 차선 추종 (유지)
     if state == State.LANE_FOLLOWING:
@@ -322,19 +440,7 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
 
     # 2. 제자리 회전 (초음파 조건 삭제, IMU 50도 정밀 회전)
     if state == State.AVOID_TURN_OUT:
-        if target_yaw is None:
-            # 목표 각도를 360도 범위 내로 정규화
-            target_yaw = (shared_yaw + (avoid_direction.value * 50.0)) % 360.0
-            
-        set_command(0.0, avoid_direction.value * TURN_ANGULAR_SPEED)
-        
-        # 현재 각도와 목표 각도의 최단 오차 계산 (-180 ~ 180도 범위)
-        diff = (shared_yaw - target_yaw + 180.0) % 360.0 - 180.0
-        
-        if abs(diff) <= 2.0:
-            force_stop()
-            target_yaw = None  # 변수 초기화
-            transition(State.AVOID_PAUSE)
+        run_imu_turn(avoid_direction.value, State.AVOID_PAUSE)
         return
 
     # 2-1. 회전 후 잠시 대기 (유지)
@@ -375,19 +481,7 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
 
     # 4. 제자리 정렬 (초기 회전의 반대 방향으로 IMU 50도 역회전)
     if state == State.AVOID_ALIGN:
-        if target_yaw is None:
-            # 돌아온 만큼 반대로(-적용) 목표 설정 및 정규화
-            target_yaw = (shared_yaw + (-avoid_direction.value * 50.0)) % 360.0
-            
-        set_command(0.0, -avoid_direction.value * TURN_ANGULAR_SPEED)
-        
-        # 최단 오차 계산
-        diff = (shared_yaw - target_yaw + 180.0) % 360.0 - 180.0
-        
-        if abs(diff) <= 2.0:
-            force_stop()
-            target_yaw = None
-            transition(State.AVOID_FORWARD)
+        run_imu_turn(-avoid_direction.value, State.AVOID_FORWARD)
         return
 
     # 5. 직진 통과 (정확히 40cm 이동)
@@ -401,13 +495,12 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
             transition(State.RECOVERY_TURN_IN)
         return
 
-    # 6. 복귀 기동 (유지)
+    # 6. 복귀 기동: 시간 기반 회전 대신 동일한 IMU 50도 제한 사용
     if state == State.RECOVERY_TURN_IN:
-        if check_recovery_lane_detection(is_detected): return
-        set_command(0.0, -avoid_direction.value * TURN_ANGULAR_SPEED)
-        if state_elapsed() >= ALIGN_TIME_S:
-            force_stop()
-            transition(State.RECOVERY_DIAGONAL)
+        if check_recovery_lane_detection(is_detected):
+            reset_turn()
+            return
+        run_imu_turn(-avoid_direction.value, State.RECOVERY_DIAGONAL)
         return
 
     if state == State.RECOVERY_DIAGONAL:
@@ -430,7 +523,7 @@ def main():
         print("[에러] ROAD_MODE 설정을 확인하세요.", flush=True)
         return
 
-    ugv_serial = ultrasonic = cap = control_thread = None
+    ugv_serial = ultrasonic = cap = control_thread = imu_thread = None
     window_name = "UGV - Autonomous Avoidance"
     
     try:
@@ -507,6 +600,9 @@ def main():
         if control_thread is not None:
             control_thread.join(timeout=1.0)
             
+        if imu_thread is not None:
+            imu_thread.join(timeout=1.0)
+
         if ugv_serial is not None:
             for _ in range(3):
                 try:
