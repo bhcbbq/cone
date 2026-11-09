@@ -1,4 +1,4 @@
-# main_highway_contour_avoid_final_hybrid_optimized.py
+# main_highway_contour_avoid_final_hybrid_optimized..py
 import cv2
 import time
 import threading
@@ -11,6 +11,30 @@ from enum import Enum, auto
 import lane_detection_ver1 as lane_detection
 import ugv_control
 from ultrasonic_reader import UltrasonicReader
+
+
+import json
+# --- [전역 변수 추가] ---
+shared_yaw = 0.0
+target_yaw = None  # 회전 목표 각도 저장용
+
+# --- [IMU 수신 스레드 함수 추가] ---
+def ugv_imu_read_task(ugv_serial):
+    global shared_yaw, is_running
+    while is_running:
+        try:
+            if ugv_serial.in_waiting > 0:
+                line = ugv_serial.readline().decode('utf-8', errors='ignore').strip()
+                if line and '"yaw"' in line:
+                    data = json.loads(line)
+                    if "yaw" in data:
+                        shared_yaw = float(data["yaw"])
+        except Exception:
+            pass
+        time.sleep(0.005) # CPU 과부하 방지
+
+
+
 
 # ============================================================
 # Configuration
@@ -25,16 +49,16 @@ MAX_CAMERA_FAILURES = 3
 
 BASE_SPEED = 0.30             # m/s (일반 차선 추종)
 AVOID_SPEED = 0.15            # m/s 
-PASS_SPEED = 0.30             # m/s (대각선 및 직진 통과)
+PASS_SPEED = 0.40             # m/s (대각선 및 직진 통과)
 
 # 거리 기반 회피 조건 파라미터
 FRONT_STOP_CM = 60.0         # 회피 시작 기준 거리 (전방 장애물 인식)
 FRONT_SAFE_CM = 70.0          # 회전 시 전방이 70cm 이상 확보되어야 회전 완료
 SIDE_DANGER_CM = 30.0         # 측면 30cm 미만일 경우 너무 가까워 임시 정지
-SIDE_CLEAR_CM = 50.0          # 측면 50cm 이상 멀어지면 장애물을 통과했다고 판단
+SIDE_CLEAR_CM = 50.0          # 측면 50cm 이상 멀어지면 장애물을 통과했다고 판단X
 
 ALIGN_TIME_S = 1.6
-TURN_ANGULAR_SPEED = 2.4      # 제자리 회전 각속도
+TURN_ANGULAR_SPEED = 2.6     # 제자리 회전 각속도
 
 CONTROL_PERIOD_S = 0.02
 NO_OBSTACLE = -1.0
@@ -53,7 +77,6 @@ class State(Enum):
     AVOID_TURN_OUT = auto()    
     AVOID_PAUSE = auto()       # 회전 후 센서값 안정화를 위해 잠시 멈추는 상태
     AVOID_DIAGONAL = auto()    
-    AVOID_DIAGONAL_EXTRA = auto() # [추가] 측면 확보 후 여유 전진
     AVOID_ALIGN = auto()       
     AVOID_FORWARD = auto()     
     RECOVERY_TURN_IN = auto()  
@@ -240,14 +263,14 @@ def check_recovery_lane_detection(is_detected):
 
 def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
     global avoid_direction, state, front_obstacle_count, avoid_count, recovery_done_count
+    global shared_yaw, target_yaw  # IMU 제어용 전역 변수 추가
 
-    # 1. 차선 추종 (방어적 비상 정지 적용 완료)
+    # 1. 차선 추종 (유지)
     if state == State.LANE_FOLLOWING:
         is_front_close = (0.0 < front_d <= FRONT_STOP_CM) or (front_obstacle_count > 0 and front_d < 0)
 
         if is_front_close:
             front_obstacle_count += 1
-            # 1회만 감지되어도 즉시 모터를 끄고 강제 브레이크
             force_stop()
         else:
             if front_obstacle_count > 0:
@@ -278,72 +301,89 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
             set_command(BASE_SPEED, None, error=error)
         return
 
-    # 1-1. 장애물 발견 직후 완전 정지 (관성 제거 0.6초)
+    # 1-1. 장애물 발견 직후 완전 정지 (유지)
     if state == State.AVOID_START_PAUSE:
         force_stop()
         if state_elapsed() >= 0.6: 
             transition(State.AVOID_TURN_OUT)
         return
 
-    # 2. 제자리 회전
+    # 2. 제자리 회전 (초음파 조건 삭제, IMU 50도 정밀 회전)
     if state == State.AVOID_TURN_OUT:
+        if target_yaw is None:
+            # 현재 각도에서 50도 목표값 설정
+            target_yaw = shared_yaw + (avoid_direction.value * 50.0)
+            
         set_command(0.0, avoid_direction.value * TURN_ANGULAR_SPEED)
-        if front_d >= FRONT_SAFE_CM or front_d < 0:
+        
+        if abs(shared_yaw - target_yaw) <= 2.0:
             force_stop()
+            target_yaw = None  # 변수 초기화
             transition(State.AVOID_PAUSE)
         return
 
-    # 2-1. 회전 후 잠시 대기
+    # 2-1. 회전 후 잠시 대기 (유지)
     if state == State.AVOID_PAUSE:
         force_stop()
         if state_elapsed() >= 0.3:
             transition(State.AVOID_DIAGONAL)
         return
 
-    # 3. 대각선 전진
+    # 3. 대각선 전진 (통과 후 10cm 여유 마진 주행 추가)
     if state == State.AVOID_DIAGONAL:
         side_d = right_d if avoid_direction == AvoidDirection.LEFT else left_d
         
-        if 0.0 < side_d < SIDE_DANGER_CM:
-            force_stop()
-            print(f"[위험] 측면 장애물 초근접! ({side_d:.1f}cm) -> 충돌 방지 대기", flush=True)
-        elif side_d >= SIDE_CLEAR_CM:
-            # [수정] 50cm 통과 시 바로 정렬하지 않고 여유 전진 시작
-            print(f"[통과] 측면 클리어 ({side_d:.1f}cm) -> 여유 전진 시작", flush=True)
-            transition(State.AVOID_DIAGONAL_EXTRA)
-        elif side_d < 0:
-            set_command(AVOID_SPEED, 0.0)
+        # 10cm 여유 마진 타이머용 내부 변수 초기화
+        if not hasattr(run_fsm, 'clear_time'):
+            run_fsm.clear_time = None
+
+        if run_fsm.clear_time is None:
+            if 0.0 < side_d < SIDE_DANGER_CM:
+                force_stop()
+                print(f"[위험] 측면 장애물 초근접! ({side_d:.1f}cm) -> 충돌 방지 대기", flush=True)
+            elif side_d >= SIDE_CLEAR_CM or side_d < 0:
+                # 장애물을 벗어났을 때 (또는 센서 범위를 벗어나 -1이 뜰 때) 10cm 카운트 시작
+                run_fsm.clear_time = time.monotonic()
+                print("[통과] 측면 클리어 -> 추가 10cm 마진 전진 시작", flush=True)
+            else:
+                set_command(AVOID_SPEED, 0.0)
         else:
             set_command(AVOID_SPEED, 0.0)
+            # AVOID_SPEED 속도로 10cm(0.1m)를 가는 데 걸리는 시간 계산
+            extra_time = 0.10 / AVOID_SPEED 
+            
+            if time.monotonic() - run_fsm.clear_time >= extra_time:
+                force_stop()
+                run_fsm.clear_time = None # 변수 초기화
+                transition(State.AVOID_ALIGN)
         return
 
-    # 3-1. 여유 대각선 전진 (50cm 확보 후 0.3초 추가 전진)
-    if state == State.AVOID_DIAGONAL_EXTRA:
-        set_command(AVOID_SPEED, 0.0)
-        if state_elapsed() >= 0.3:
-            force_stop()
-            print("[통과] 여유 전진 완료 -> 평행 정렬 시작", flush=True)
-            transition(State.AVOID_ALIGN)
-        return
-
-    # 4. 제자리 정렬
+    # 4. 제자리 정렬 (초기 회전의 반대 방향으로 IMU 50도 역회전)
     if state == State.AVOID_ALIGN:
+        if target_yaw is None:
+            # 돌아온 만큼 반대로(-적용) 50도 목표 설정
+            target_yaw = shared_yaw + (-avoid_direction.value * 50.0)
+            
         set_command(0.0, -avoid_direction.value * TURN_ANGULAR_SPEED)
-        if state_elapsed() >= ALIGN_TIME_S:
+        
+        if abs(shared_yaw - target_yaw) <= 2.0:
             force_stop()
+            target_yaw = None
             transition(State.AVOID_FORWARD)
         return
 
-    # 5. 직진 통과
+    # 5. 직진 통과 (정확히 40cm 이동)
     if state == State.AVOID_FORWARD:
         set_command(PASS_SPEED, 0.0)
-        # [수정] 1.2초 -> 1.5초 직진
-        if state_elapsed() >= 1.5:
+        # PASS_SPEED 속도로 40cm(0.4m)를 가는 데 걸리는 시간 계산
+        pass_time = 0.40 / PASS_SPEED
+        
+        if state_elapsed() >= pass_time:
             force_stop()
             transition(State.RECOVERY_TURN_IN)
         return
 
-    # 6. 복귀 기동
+    # 6. 복귀 기동 (유지)
     if state == State.RECOVERY_TURN_IN:
         if check_recovery_lane_detection(is_detected): return
         set_command(0.0, -avoid_direction.value * TURN_ANGULAR_SPEED)
@@ -361,7 +401,6 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
             print("[에러] 타임아웃: 차선을 찾지 못했습니다.", flush=True)
             transition(State.LANE_FOLLOWING)
         return
-
 # ============================================================
 # Main Loop
 # ============================================================
@@ -378,7 +417,12 @@ def main():
     try:
         ugv_serial = ugv_control.init_ugv(port=UGV_PORT, baudrate=SERIAL_BAUD)
         ugv_control.send_driving_command(ugv_serial, 0.0, 0.0)
-
+# --- [추가된 부분: IMU 연속 피드백 켜기 및 읽기 스레드 시작] ---
+        ugv_serial.write(b'{"T":131, "cmd":1}\n')
+        
+        imu_thread = threading.Thread(target=ugv_imu_read_task, args=(ugv_serial,), daemon=True)
+        imu_thread.start()
+        # -------------------------------------------------------------
         ultrasonic = create_ultrasonic_reader()
         time.sleep(0.5)
 

@@ -93,10 +93,10 @@ def lane_edges(frame):
     vertices = np.array(
         [
             [
-                (int(width * 0.05), int(height * 0.96)),
-                (int(width * 0.40), int(height * 0.66)),
-                (int(width * 0.60), int(height * 0.66)),
-                (int(width * 0.95), int(height * 0.96)),
+                (int(width * 0.05), int(height * 0.96)), # 왼쪽 아래
+                (int(width * 0.25), int(height * 0.40)), # 왼쪽 위
+                (int(width * 0.75), int(height * 0.40)), # 오른쪽 위
+                (int(width * 0.95), int(height * 0.96)), # 오른쪽 아래
             ]
         ],
         dtype=np.int32,
