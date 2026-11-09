@@ -12,6 +12,30 @@ import lane_detection_ver1 as lane_detection
 import ugv_control
 from ultrasonic_reader import UltrasonicReader
 
+
+import json
+# --- [전역 변수 추가] ---
+shared_yaw = 0.0
+target_yaw = None  # 회전 목표 각도 저장용
+
+# --- [IMU 수신 스레드 함수 추가] ---
+def ugv_imu_read_task(ugv_serial):
+    global shared_yaw, is_running
+    while is_running:
+        try:
+            if ugv_serial.in_waiting > 0:
+                line = ugv_serial.readline().decode('utf-8', errors='ignore').strip()
+                if line and '"yaw"' in line:
+                    data = json.loads(line)
+                    if "yaw" in data:
+                        shared_yaw = float(data["yaw"])
+        except Exception:
+            pass
+        time.sleep(0.005) # CPU 과부하 방지
+
+
+
+
 # ============================================================
 # Configuration
 # ============================================================
@@ -25,16 +49,16 @@ MAX_CAMERA_FAILURES = 3
 
 BASE_SPEED = 0.30             # m/s (일반 차선 추종)
 AVOID_SPEED = 0.15            # m/s 
-PASS_SPEED = 0.30             # m/s (대각선 및 직진 통과)
+PASS_SPEED = 0.40             # m/s (대각선 및 직진 통과)
 
 # 거리 기반 회피 조건 파라미터
 FRONT_STOP_CM = 60.0         # 회피 시작 기준 거리 (전방 장애물 인식)
 FRONT_SAFE_CM = 70.0          # 회전 시 전방이 70cm 이상 확보되어야 회전 완료
 SIDE_DANGER_CM = 30.0         # 측면 30cm 미만일 경우 너무 가까워 임시 정지
-SIDE_CLEAR_CM = 50.0          # 측면 50cm 이상 멀어지면 장애물을 통과했다고 판단
+SIDE_CLEAR_CM = 50.0          # 측면 50cm 이상 멀어지면 장애물을 통과했다고 판단X
 
 ALIGN_TIME_S = 1.6
-TURN_ANGULAR_SPEED = 2.4      # 제자리 회전 각속도
+TURN_ANGULAR_SPEED = 2.6     # 제자리 회전 각속도
 
 CONTROL_PERIOD_S = 0.02
 NO_OBSTACLE = -1.0
@@ -53,7 +77,6 @@ class State(Enum):
     AVOID_TURN_OUT = auto()    
     AVOID_PAUSE = auto()       # 회전 후 센서값 안정화를 위해 잠시 멈추는 상태
     AVOID_DIAGONAL = auto()    
-    AVOID_DIAGONAL_EXTRA = auto() # [추가] 측면 확보 후 여유 전진
     AVOID_ALIGN = auto()       
     AVOID_FORWARD = auto()     
     RECOVERY_TURN_IN = auto()  
@@ -308,22 +331,13 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
             force_stop()
             print(f"[위험] 측면 장애물 초근접! ({side_d:.1f}cm) -> 충돌 방지 대기", flush=True)
         elif side_d >= SIDE_CLEAR_CM:
-            # [수정] 50cm 통과 시 바로 정렬하지 않고 여유 전진 시작
-            print(f"[통과] 측면 클리어 ({side_d:.1f}cm) -> 여유 전진 시작", flush=True)
-            transition(State.AVOID_DIAGONAL_EXTRA)
+            force_stop()
+            print(f"[통과] 측면 클리어 ({side_d:.1f}cm) -> 평행 정렬 시작", flush=True)
+            transition(State.AVOID_ALIGN)
         elif side_d < 0:
             set_command(AVOID_SPEED, 0.0)
         else:
             set_command(AVOID_SPEED, 0.0)
-        return
-
-    # 3-1. 여유 대각선 전진 (50cm 확보 후 0.3초 추가 전진)
-    if state == State.AVOID_DIAGONAL_EXTRA:
-        set_command(AVOID_SPEED, 0.0)
-        if state_elapsed() >= 0.3:
-            force_stop()
-            print("[통과] 여유 전진 완료 -> 평행 정렬 시작", flush=True)
-            transition(State.AVOID_ALIGN)
         return
 
     # 4. 제자리 정렬
@@ -337,8 +351,7 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
     # 5. 직진 통과
     if state == State.AVOID_FORWARD:
         set_command(PASS_SPEED, 0.0)
-        # [수정] 1.2초 -> 1.5초 직진
-        if state_elapsed() >= 1.5:
+        if state_elapsed() >= 1.2:
             force_stop()
             transition(State.RECOVERY_TURN_IN)
         return
@@ -378,7 +391,12 @@ def main():
     try:
         ugv_serial = ugv_control.init_ugv(port=UGV_PORT, baudrate=SERIAL_BAUD)
         ugv_control.send_driving_command(ugv_serial, 0.0, 0.0)
-
+# --- [추가된 부분: IMU 연속 피드백 켜기 및 읽기 스레드 시작] ---
+        ugv_serial.write(b'{"T":131, "cmd":1}\n')
+        
+        imu_thread = threading.Thread(target=ugv_imu_read_task, args=(ugv_serial,), daemon=True)
+        imu_thread.start()
+        # -------------------------------------------------------------
         ultrasonic = create_ultrasonic_reader()
         time.sleep(0.5)
 
