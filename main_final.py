@@ -1,5 +1,4 @@
 import cv2
-import os
 import time
 import threading
 import json
@@ -14,13 +13,6 @@ import ugv_control
 
 BASE_SPEED = 0.30
 
-# 로컬 데스크톱(VNC 포함)에서만 표시. SSH의 X11 전달도 표시하지 않음.
-SHOW_WINDOWS = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")) and not any(
-    os.environ.get(name) for name in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY")
-)
-LANE_WINDOW = "Smart Cone - Lane Tracking"
-CANNY_WINDOW = "Smart Cone - Raw Canny | Lane ROI"
-
 # 수동 주행 전용 속도
 # 앱 수동 페이지의 슬라이더(SPEED:0.20 ~ 0.50)로 변경
 MANUAL_SPEED = 0.30
@@ -33,12 +25,19 @@ MANUAL_INNER_RATIO = 0.50
 # 복귀 제자리 180도 회전 속도
 TURN_SPEED = 0.25
 
+# 목표각에 가까워졌을 때 감속
+TURN_SLOW_SPEED = 0.18
+TURN_SLOW_REMAIN_DEG = 25.0
+
+# IMU yaw 기준 복귀 회전각
+RETURN_TURN_TARGET_DEG = 180.0
+RETURN_TURN_TOLERANCE_DEG = 3.0
+
+# 180도 회전 후 정지 상태에서 차선을 연속으로 확인한 뒤 복귀 시작
+RETURN_DETECT_STABLE_FRAMES = 5
+
 # 영상 정렬 시 천천히 회전
 ALIGN_TURN_SPEED = 0.18
-
-# 제자리 회전 엔코더 기준 거리
-# 실제 180도 회전각을 보면서 조정
-COARSE_TURN_DISTANCE_M = 0.44
 
 # 차선 중심 오차 허용 범위
 # 실제 테스트하면서 조정
@@ -567,8 +566,13 @@ target_distance_m = None
 # RETURN STATE
 # ============================================================
 
-return_turn_start_odl = None
-return_turn_start_odr = None
+# IMU yaw 상태 (degree 기준으로 통일)
+current_yaw = None
+
+# RETURN_TURN에서 yaw 변화량을 누적해 실제 회전각 계산
+return_turn_start_yaw = None
+return_turn_last_yaw = None
+return_turn_accum_deg = 0.0
 
 return_drive_start_odl = None
 return_drive_start_odr = None
@@ -668,8 +672,10 @@ def hc12_thread_task():
     global return_drive_distance
     global target_distance_m
 
-    global return_turn_start_odl
-    global return_turn_start_odr
+    global current_yaw
+    global return_turn_start_yaw
+    global return_turn_last_yaw
+    global return_turn_accum_deg
 
     global align_stable_count
     global paused_return_mode
@@ -1014,9 +1020,17 @@ def hc12_thread_task():
 
                                 continue
 
-                            return_turn_start_odl = current_odl
+                            if current_yaw is None:
 
-                            return_turn_start_odr = current_odr
+                                print("[RETURN 오류] IMU yaw 데이터 없음")
+
+                                send_hc12("RETURN_ERROR:NO_YAW")
+
+                                continue
+
+                            return_turn_start_yaw = current_yaw
+                            return_turn_last_yaw = current_yaw
+                            return_turn_accum_deg = 0.0
 
                             align_stable_count = 0
                             paused_return_mode = None
@@ -1027,7 +1041,8 @@ def hc12_thread_task():
 
                         send_hc12("RETURNING")
 
-                        print("[RETURN] 대략적인 180도 회전 시작")
+                        print("[RETURN] IMU yaw 기준 180도 회전 시작")
+                        print("[RETURN] 시작 yaw:", f"{return_turn_start_yaw:.1f} deg")
 
                         print("[RETURN] 복귀거리:", f"{return_drive_distance:.2f} m")
 
@@ -1050,6 +1065,11 @@ def hc12_thread_task():
                                 continue
 
                             mode = paused_return_mode
+
+                            # RETURN_TURN 재개 시 정지 중 yaw 드리프트를 누적하지 않도록 기준 갱신
+                            if mode == "RETURN_TURN" and current_yaw is not None:
+                                return_turn_last_yaw = current_yaw
+
                             paused_return_mode = None
                             stop_pending = False
 
@@ -1122,6 +1142,9 @@ def ugv_receive_thread_task():
     global return_drive_start_odl
     global return_drive_start_odr
     global paused_return_mode
+    global current_yaw
+    global return_turn_last_yaw
+    global return_turn_accum_deg
     global tipped_notified
 
     print("[알림] UGV 수신 스레드 시작")
@@ -1178,6 +1201,29 @@ def ugv_receive_thread_task():
                             .strip()
                         )
                         battery = float(battery_text)
+
+                    # IMU yaw를 degree 단위로 통일
+                    # 커스텀 T2100의 "yaw"는 degree로 사용
+                    # 공식 데모 계열의 "y"는 radian으로 보고 degree로 변환
+                    yaw = None
+
+                    if '"yaw":' in line:
+                        yaw_text = (
+                            line.split('"yaw":', 1)[1]
+                            .split(",", 1)[0]
+                            .split("}", 1)[0]
+                            .strip()
+                        )
+                        yaw = float(yaw_text)
+
+                    elif '"y":' in line:
+                        yaw_text = (
+                            line.split('"y":', 1)[1]
+                            .split(",", 1)[0]
+                            .split("}", 1)[0]
+                            .strip()
+                        )
+                        yaw = np.degrees(float(yaw_text))
 
                     tipped = False
 
@@ -1249,6 +1295,9 @@ def ugv_receive_thread_task():
 
                     current_odl = odl
                     current_odr = odr
+
+                    if yaw is not None:
+                        current_yaw = yaw
 
                     current_mode = mode
 
@@ -1323,38 +1372,47 @@ def ugv_receive_thread_task():
 
                     # =================================================
                     # RETURN_TURN
-                    # 엔코더로 대략적인 회전
+                    # IMU yaw 변화량 누적으로 180도 회전
                     # =================================================
 
                     if current_mode == "RETURN_TURN":
 
-                        if (
-                            return_turn_start_odl is not None
-                            and return_turn_start_odr is not None
-                        ):
+                        if current_yaw is not None and return_turn_last_yaw is not None:
 
-                            left_m = abs(odl - return_turn_start_odl) / 100.0
+                            # -180 ~ +180 범위로 정규화하여
+                            # 179 -> -179 같은 wrap-around에서도 실제 변화량만 계산
+                            yaw_delta = (
+                                current_yaw - return_turn_last_yaw + 180.0
+                            ) % 360.0 - 180.0
 
-                            right_m = abs(odr - return_turn_start_odr) / 100.0
+                            # 비정상적으로 큰 1회 점프는 센서 오류로 보고 무시
+                            if abs(yaw_delta) <= 45.0:
+                                return_turn_accum_deg += abs(yaw_delta)
 
-                            turn_distance = (left_m + right_m) / 2.0
+                            return_turn_last_yaw = current_yaw
+
+                            remaining_deg = max(
+                                0.0,
+                                RETURN_TURN_TARGET_DEG - return_turn_accum_deg,
+                            )
 
                             print(
                                 "[RETURN 회전]",
-                                f"{turn_distance:.2f}",
+                                f"yaw={current_yaw:.1f} deg",
+                                f"회전={return_turn_accum_deg:.1f}",
                                 "/",
-                                f"{COARSE_TURN_DISTANCE_M:.2f} m",
+                                f"{RETURN_TURN_TARGET_DEG:.1f} deg",
                             )
 
-                            if turn_distance >= COARSE_TURN_DISTANCE_M:
+                            if remaining_deg <= RETURN_TURN_TOLERANCE_DEG:
 
                                 stop_ugv_now()
 
                                 mode = "RETURN_ALIGN"
 
-                                print("[RETURN] 대략적인 회전 완료")
+                                print("[RETURN] IMU 180도 회전 완료")
 
-                                print("[RETURN] 영상처리 차선 정렬 시작")
+                                print("[RETURN] 정지 상태에서 차선 인식 대기 시작")
 
                     # =================================================
                     # RETURN_DRIVE
@@ -1532,92 +1590,64 @@ def control_thread_task():
 
         elif current_mode == "RETURN_TURN":
 
-            # 좌우 바퀴를 반대 방향으로 돌려 제자리에서 180도 회전
-            send_raw_ugv('{"T":1,' f'"L":{-TURN_SPEED},' f'"R":{TURN_SPEED}' "}")
+            # 기존과 같은 회전 방향을 유지하되, 목표각 근처에서는 감속
+            with state_lock:
+                remaining_deg = max(
+                    0.0,
+                    RETURN_TURN_TARGET_DEG - return_turn_accum_deg,
+                )
+
+            turn_speed = (
+                TURN_SLOW_SPEED if remaining_deg <= TURN_SLOW_REMAIN_DEG else TURN_SPEED
+            )
+
+            send_raw_ugv('{"T":1,' f'"L":{-turn_speed},' f'"R":{turn_speed}' "}")
 
         # ============================================================
         # RETURN_ALIGN
         #
-        # 엔코더로 대충 반대 방향까지 돈 다음
-        # 카메라로 실제 차선 중심을 맞춤
+        # IMU yaw로 180도 회전한 다음
+        # 카메라로 실제 차선 중심을 미세 정렬
         # ============================================================
 
         elif current_mode == "RETURN_ALIGN":
 
-            # --------------------------------------------------------
-            # 차선 검출 성공
-            # --------------------------------------------------------
+            # IMU로 180도 회전을 마친 뒤에는 더 이상 제자리 회전하지 않는다.
+            # 완전히 정지한 상태에서 차선이 안정적으로 검출되기만 기다린다.
+            stop_ugv_now()
 
             if detected:
-
                 lane_lost_printed = False
+                align_stable_count += 1
 
-                print("[RETURN ALIGN]", "error:", f"{current_error:.2f}")
-
-                # 아직 중심과 차이가 큼
-                if abs(current_error) > ALIGN_ERROR_THRESHOLD:
-
-                    align_stable_count = 0
-
-                    # 같은 방향으로 천천히 계속 회전
-                    send_raw_ugv(
-                        '{"T":1,'
-                        f'"L":{-ALIGN_TURN_SPEED},'
-                        f'"R":{ALIGN_TURN_SPEED}'
-                        "}"
-                    )
-
-                # 중앙에 들어옴
-                else:
-
-                    stop_ugv_now()
-
-                    align_stable_count += 1
-
-                    print(
-                        "[RETURN ALIGN] 안정화",
-                        align_stable_count,
-                        "/",
-                        ALIGN_STABLE_FRAMES,
-                    )
-
-                    # 일정 프레임 연속으로 중앙
-                    if align_stable_count >= ALIGN_STABLE_FRAMES:
-
-                        with state_lock:
-
-                            # 이 순간부터 복귀거리 측정
-                            return_drive_start_odl = current_odl
-
-                            return_drive_start_odr = current_odr
-
-                            mode = "RETURN_DRIVE"
-
-                            align_stable_count = 0
-
-                        send_hc12("RETURN_DRIVING")
-
-                        print("[RETURN] 영상 정렬 완료")
-
-                        print("[RETURN] 차선추종 복귀 시작")
-
-            # --------------------------------------------------------
-            # 차선 아직 안 보임
-            # --------------------------------------------------------
-
-            else:
-
-                align_stable_count = 0
-
-                # 같은 방향으로 계속 천천히 회전하면서 탐색
-                send_raw_ugv(
-                    '{"T":1,' f'"L":{-ALIGN_TURN_SPEED},' f'"R":{ALIGN_TURN_SPEED}' "}"
+                print(
+                    "[RETURN WAIT] 차선 검출",
+                    align_stable_count,
+                    "/",
+                    RETURN_DETECT_STABLE_FRAMES,
                 )
 
+                if align_stable_count >= RETURN_DETECT_STABLE_FRAMES:
+
+                    with state_lock:
+
+                        # 이 순간부터 복귀거리 측정 시작
+                        return_drive_start_odl = current_odl
+                        return_drive_start_odr = current_odr
+
+                        mode = "RETURN_DRIVE"
+                        align_stable_count = 0
+
+                    send_hc12("RETURN_DRIVING")
+
+                    print("[RETURN] 차선 인식 완료")
+                    print("[RETURN] 차선추종 복귀 시작")
+
+            else:
+                align_stable_count = 0
+
                 if not lane_lost_printed:
-
-                    print("[RETURN ALIGN] 차선 탐색 중...")
-
+                    print("[RETURN WAIT] 정지 상태에서 차선 인식 대기...")
                     lane_lost_printed = True
 
         # ============================================================
@@ -1754,13 +1784,6 @@ if __name__ == "__main__":
         # lane_detection_ver2 추적기
         lane_tracker = LaneTracker()
 
-        if SHOW_WINDOWS:
-            cv2.namedWindow(LANE_WINDOW, cv2.WINDOW_NORMAL)
-            cv2.namedWindow(CANNY_WINDOW, cv2.WINDOW_NORMAL)
-            print("[화면] 차선 인식과 Canny 표시. Q 또는 Esc로 종료.")
-        else:
-            print("[화면] SSH 또는 디스플레이 없는 환경: 화면 출력 끔.")
-
         # ============================================================
         # THREADS
         # ============================================================
@@ -1828,15 +1851,17 @@ if __name__ == "__main__":
 
                 lane_detected = is_detected
 
-            if SHOW_WINDOWS:
-                # 왼쪽: 전체 Canny / 오른쪽: 색상 필터와 ROI 적용 후 차선 검출용 에지
-                canny_view = np.hstack((raw_edges, lane_edge_image))
-                cv2.imshow(LANE_WINDOW, result_image)
-                cv2.imshow(CANNY_WINDOW, canny_view)
-
-                key = cv2.waitKey(1) & 0xFF
-                if key in (ord("q"), ord("Q"), 27):
-                    break
+            # SSH 환경에서는 GUI 끔
+            #
+            # 필요하면:
+            #
+            # cv2.imshow(
+            #     "Smart Cone",
+            #     result_image
+            # )
+            #
+            # if cv2.waitKey(1) & 0xFF == ord("q"):
+            #     break
 
     except KeyboardInterrupt:
 
@@ -1888,7 +1913,6 @@ if __name__ == "__main__":
         except Exception:
             pass
 
-        if SHOW_WINDOWS:
-            cv2.destroyAllWindows()
+        cv2.destroyAllWindows()
 
         print("[종료] 완료")
