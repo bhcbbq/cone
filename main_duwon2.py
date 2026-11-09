@@ -22,16 +22,18 @@ target_yaw = None  # 회전 목표 각도 저장용
 def ugv_imu_read_task(ugv_serial):
     global shared_yaw, is_running
     while is_running:
-        try:
-            if ugv_serial.in_waiting > 0:
+        # 변경점: if 대신 while을 사용하여 버퍼에 쌓인 밀린 데이터를 즉시 모두 소진
+        while ugv_serial.in_waiting > 0:
+            try:
                 line = ugv_serial.readline().decode('utf-8', errors='ignore').strip()
                 if line and '"yaw"' in line:
                     data = json.loads(line)
                     if "yaw" in data:
                         shared_yaw = float(data["yaw"])
-        except Exception:
-            pass
-        time.sleep(0.005) # CPU 과부하 방지
+            except Exception:
+                pass # JSON 파싱 에러 등 깨진 데이터가 있어도 무시하고 다음 줄을 읽음
+                
+        time.sleep(0.005) # CPU 과부하 방지dd
 
 # ============================================================
 # Configuration
