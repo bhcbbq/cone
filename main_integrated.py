@@ -1,4 +1,5 @@
 import cv2
+import os
 import time
 import threading
 import json
@@ -13,6 +14,13 @@ import ugv_control
 # ============================================================
 
 BASE_SPEED = 0.30
+
+# 젯슨 데스크톱(VNC 포함)에서만 표시. SSH의 X11 전달도 제외.
+SHOW_WINDOWS = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")) and not any(
+    os.environ.get(name) for name in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY")
+)
+LANE_WINDOW = "Smart Cone - Lane Tracking"
+CANNY_WINDOW = "Smart Cone - Raw Canny | Lane ROI"
 
 # 수동 주행 전용 속도
 # 앱 수동 페이지의 슬라이더(SPEED:0.20 ~ 0.50)로 변경
@@ -1167,6 +1175,13 @@ if __name__ == "__main__":
 
         print("[알림] 카메라 연결 완료")
 
+        if SHOW_WINDOWS:
+            cv2.namedWindow(LANE_WINDOW, cv2.WINDOW_NORMAL)
+            cv2.namedWindow(CANNY_WINDOW, cv2.WINDOW_NORMAL)
+            print("[화면] 차선 인식과 Canny 표시. Q 또는 Esc로 종료.")
+        else:
+            print("[화면] SSH 또는 디스플레이 없는 환경: 화면 출력 끔.")
+
         # ============================================================
         # THREADS
         # ============================================================
@@ -1255,17 +1270,15 @@ if __name__ == "__main__":
 
                 lane_detected = is_detected
 
-            # SSH 환경에서는 GUI 끔
-            #
-            # 필요하면:
-            #
-            # cv2.imshow(
-            #     "Smart Cone",
-            #     result_image
-            # )
-            #
-            # if cv2.waitKey(1) & 0xFF == ord("q"):
-            #     break
+            if SHOW_WINDOWS:
+                # 왼쪽: 전체 Canny / 오른쪽: ROI를 적용한 차선 검출용 에지
+                canny_view = np.hstack((edges, cropped_edges))
+                cv2.imshow(LANE_WINDOW, result_image)
+                cv2.imshow(CANNY_WINDOW, canny_view)
+
+                key = cv2.waitKey(1) & 0xFF
+                if key in (ord("q"), ord("Q"), 27):
+                    break
 
     except KeyboardInterrupt:
 
@@ -1317,6 +1330,7 @@ if __name__ == "__main__":
         except Exception:
             pass
 
-        cv2.destroyAllWindows()
+        if SHOW_WINDOWS:
+            cv2.destroyAllWindows()
 
         print("[종료] 완료")
