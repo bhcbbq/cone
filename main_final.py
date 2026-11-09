@@ -93,12 +93,17 @@ def lane_edges(frame):
     edges = cv2.bitwise_and(raw_edges, colors)
     mask = np.zeros_like(edges)
 
-    vertices = np.array([[
-        (int(width * 0.05), int(height * 0.96)),
-        (int(width * 0.40), int(height * 0.66)),
-        (int(width * 0.60), int(height * 0.66)),
-        (int(width * 0.95), int(height * 0.96)),
-    ]], dtype=np.int32)
+    vertices = np.array(
+        [
+            [
+                (int(width * 0.05), int(height * 0.96)),
+                (int(width * 0.40), int(height * 0.66)),
+                (int(width * 0.60), int(height * 0.66)),
+                (int(width * 0.95), int(height * 0.96)),
+            ]
+        ],
+        dtype=np.int32,
+    )
 
     cv2.fillPoly(mask, vertices, 255)
     lane_edge_image = cv2.bitwise_and(edges, mask)
@@ -142,10 +147,12 @@ class LaneTracker:
 
             b = x1 - a * y1
 
-            ends = np.array([
-                a * y_top + b,
-                a * y_bottom + b,
-            ])
+            ends = np.array(
+                [
+                    a * y_top + b,
+                    a * y_bottom + b,
+                ]
+            )
 
             if not -width * 0.10 < ends[1] < width * 1.10:
                 continue
@@ -169,34 +176,28 @@ class LaneTracker:
 
             length = min(np.hypot(dx, dy), 80)
 
-            segments.append((
-                side,
-                ends,
-                [(x1, y1), (x2, y2)],
-                length,
-            ))
+            segments.append(
+                (
+                    side,
+                    ends,
+                    [(x1, y1), (x2, y2)],
+                    length,
+                )
+            )
 
         for side in (0, 1):
-            pool = [
-                segment
-                for segment in segments
-                if segment[0] == side
-            ]
+            pool = [segment for segment in segments if segment[0] == side]
 
             for seed in pool:
                 support = [
                     segment
                     for segment in pool
-                    if np.max(
-                        np.abs(segment[1] - seed[1])
-                    ) < width * 0.045
+                    if np.max(np.abs(segment[1] - seed[1])) < width * 0.045
                 ]
 
-                points = np.array([
-                    point
-                    for segment in support
-                    for point in segment[2]
-                ], dtype=float)
+                points = np.array(
+                    [point for segment in support for point in segment[2]], dtype=float
+                )
 
                 if len(points) < 2:
                     continue
@@ -204,10 +205,7 @@ class LaneTracker:
                 if np.ptp(points[:, 1]) < height * 0.035:
                     continue
 
-                weights = np.repeat([
-                    np.sqrt(segment[3])
-                    for segment in support
-                ], 2)
+                weights = np.repeat([np.sqrt(segment[3]) for segment in support], 2)
 
                 a, b = np.polyfit(
                     points[:, 1],
@@ -216,20 +214,17 @@ class LaneTracker:
                     w=weights,
                 )
 
-                ends = np.array([
-                    a * y_top + b,
-                    a * y_bottom + b,
-                ])
-
-                score = sum(
-                    segment[3]
-                    for segment in support
+                ends = np.array(
+                    [
+                        a * y_top + b,
+                        a * y_bottom + b,
+                    ]
                 )
 
+                score = sum(segment[3] for segment in support)
+
                 if self.pair is not None:
-                    delta = np.max(
-                        np.abs(ends - self.pair[side])
-                    )
+                    delta = np.max(np.abs(ends - self.pair[side]))
 
                     if delta > width * 0.13:
                         continue
@@ -237,8 +232,7 @@ class LaneTracker:
                     score -= delta * 2
 
                 duplicate = any(
-                    np.max(np.abs(ends - old[1])) < 10
-                    for old in groups[side]
+                    np.max(np.abs(ends - old[1])) < 10 for old in groups[side]
                 )
 
                 if not duplicate:
@@ -258,10 +252,7 @@ class LaneTracker:
         if self.pair is None:
             self.pair = measured.copy()
         else:
-            self.pair = (
-                (1 - SMOOTH_ALPHA) * self.pair
-                + SMOOTH_ALPHA * measured
-            )
+            self.pair = (1 - SMOOTH_ALPHA) * self.pair + SMOOTH_ALPHA * measured
 
         self.last_seen = now
 
@@ -272,10 +263,7 @@ class LaneTracker:
             self.reset()
             self.shape = edges.shape
 
-        if (
-            self.last_seen is not None
-            and now - self.last_seen > HOLD_SECONDS
-        ):
+        if self.last_seen is not None and now - self.last_seen > HOLD_SECONDS:
             self.reset()
 
         # 기존 허프변환 설정 유지
@@ -303,33 +291,24 @@ class LaneTracker:
                 if not width * 0.12 < widths[1] < width * 0.95:
                     continue
 
-                if not (
-                    -width * 0.03
-                    < widths[0]
-                    < widths[1] * 0.85
-                ):
+                if not (-width * 0.03 < widths[0] < widths[1] * 0.85):
                     continue
 
                 if self.pair is None:
                     if not left[1] < width * 0.5 < right[1]:
                         continue
 
-                if not (
-                    -width * 0.15 < left.min()
-                    and right.max() < width * 1.15
-                ):
+                if not (-width * 0.15 < left.min() and right.max() < width * 1.15):
                     continue
 
-                score = (
-                    min(left_score, 100)
-                    + min(right_score, 100)
-                    - widths[1] * 0.8
-                )
+                score = min(left_score, 100) + min(right_score, 100) - widths[1] * 0.8
 
-                choices.append((
-                    score,
-                    np.array([left, right]),
-                ))
+                choices.append(
+                    (
+                        score,
+                        np.array([left, right]),
+                    )
+                )
 
         # 양쪽 차선 실제 검출
         if choices:
@@ -345,10 +324,7 @@ class LaneTracker:
                 if self.lane_width is None:
                     self.lane_width = measured_width.copy()
                 else:
-                    self.lane_width = (
-                        0.9 * self.lane_width
-                        + 0.1 * measured_width
-                    )
+                    self.lane_width = 0.9 * self.lane_width + 0.1 * measured_width
 
                 self.width_count += 1
             else:
@@ -365,35 +341,35 @@ class LaneTracker:
             and self.width_count >= WIDTH_LEARN_FRAMES
         )
 
-        only_one_side = (
-            bool(left_candidates) != bool(right_candidates)
-        )
+        only_one_side = bool(left_candidates) != bool(right_candidates)
 
         # 한쪽 검출 시 기억한 차선 폭으로 반대쪽 추정
         if ready and only_one_side:
             if left_candidates:
                 left = left_candidates[0][1]
 
-                measured = np.array([
-                    left,
-                    left + self.lane_width,
-                ])
+                measured = np.array(
+                    [
+                        left,
+                        left + self.lane_width,
+                    ]
+                )
 
                 status = "LEFT_ONLY"
 
             else:
                 right = right_candidates[0][1]
 
-                measured = np.array([
-                    right - self.lane_width,
-                    right,
-                ])
+                measured = np.array(
+                    [
+                        right - self.lane_width,
+                        right,
+                    ]
+                )
 
                 status = "RIGHT_ONLY"
 
-            movement = np.max(
-                np.abs(measured - self.pair)
-            )
+            movement = np.max(np.abs(measured - self.pair))
 
             if movement <= width * 0.13:
                 self.accept(measured, now)
@@ -435,24 +411,16 @@ def draw_result(frame, pair, status):
         y_top = height * 0.76
         y_bottom = height * 0.94
 
-        bottoms = (
-            pair[:, 1]
-            + (pair[:, 1] - pair[:, 0])
-            * (height - 1 - y_bottom)
-            / (y_bottom - y_top)
+        bottoms = pair[:, 1] + (pair[:, 1] - pair[:, 0]) * (height - 1 - y_bottom) / (
+            y_bottom - y_top
         )
 
         for side, (points, bottom) in enumerate(zip(pair, bottoms)):
-            inferred = (
-                (status == "LEFT_ONLY" and side == 1)
-                or (status == "RIGHT_ONLY" and side == 0)
+            inferred = (status == "LEFT_ONLY" and side == 1) or (
+                status == "RIGHT_ONLY" and side == 0
             )
 
-            color = (
-                (0, 165, 255)
-                if inferred
-                else (0, 255, 0)
-            )
+            color = (0, 165, 255) if inferred else (0, 255, 0)
 
             if status == "HELD":
                 color = (150, 150, 150)
@@ -513,11 +481,7 @@ def draw_result(frame, pair, status):
         -1,
     )
 
-    status_color = (
-        (0, 255, 0)
-        if status == "TRACKING"
-        else (0, 165, 255)
-    )
+    status_color = (0, 255, 0) if status == "TRACKING" else (0, 165, 255)
 
     cv2.putText(
         frame,
@@ -1417,7 +1381,9 @@ def ugv_receive_thread_task():
 
                             # -180 ~ +180 범위로 정규화하여
                             # 179 -> -179 같은 wrap-around에서도 실제 변화량만 계산
-                            yaw_delta = (current_yaw - return_turn_last_yaw + 180.0) % 360.0 - 180.0
+                            yaw_delta = (
+                                current_yaw - return_turn_last_yaw + 180.0
+                            ) % 360.0 - 180.0
 
                             # 비정상적으로 큰 1회 점프는 센서 오류로 보고 무시
                             if abs(yaw_delta) <= 45.0:
@@ -1632,9 +1598,7 @@ def control_thread_task():
                 )
 
             turn_speed = (
-                TURN_SLOW_SPEED
-                if remaining_deg <= TURN_SLOW_REMAIN_DEG
-                else TURN_SPEED
+                TURN_SLOW_SPEED if remaining_deg <= TURN_SLOW_REMAIN_DEG else TURN_SPEED
             )
 
             send_raw_ugv('{"T":1,' f'"L":{-turn_speed},' f'"R":{turn_speed}' "}")
