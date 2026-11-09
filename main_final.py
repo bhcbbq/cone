@@ -93,10 +93,10 @@ def lane_edges(frame):
     vertices = np.array(
         [
             [
-                (int(width * 0.05), int(height * 0.96)), # 왼쪽 아래
-                (int(width * 0.25), int(height * 0.40)), # 왼쪽 위
-                (int(width * 0.75), int(height * 0.40)), # 오른쪽 위
-                (int(width * 0.95), int(height * 0.96)), # 오른쪽 아래
+                (int(width * 0.05), int(height * 0.96)),
+                (int(width * 0.40), int(height * 0.66)),
+                (int(width * 0.60), int(height * 0.66)),
+                (int(width * 0.95), int(height * 0.96)),
             ]
         ],
         dtype=np.int32,
@@ -554,6 +554,10 @@ mission_outbound_total = 0.0
 # RETURN 시 돌아가야 하는 거리
 return_drive_distance = 0.0
 
+# 현재 자율주행 목표 거리 (m)
+# UGV 내부 T2101/T2102에만 의존하지 않고 Jetson도 엔코더로 직접 정지 판단
+target_distance_m = None
+
 
 # ============================================================
 # RETURN STATE
@@ -663,6 +667,7 @@ def hc12_thread_task():
 
     global mission_outbound_total
     global return_drive_distance
+    global target_distance_m
 
     global current_yaw
     global return_turn_start_yaw
@@ -948,6 +953,7 @@ def hc12_thread_task():
                                 start_odr = None
 
                                 stop_pending = False
+                                target_distance_m = distance
 
                             send_raw_ugv('{"T":2101,"d":' + str(distance) + "}")
 
@@ -1083,6 +1089,7 @@ def hc12_thread_task():
 
                             mission_outbound_total = 0.0
                             return_drive_distance = 0.0
+                            target_distance_m = None
 
                             paused_mission = False
                             align_stable_count = 0
@@ -1127,6 +1134,7 @@ def ugv_receive_thread_task():
 
     global mission_outbound_total
     global return_drive_distance
+    global target_distance_m
 
     global return_drive_start_odl
     global return_drive_start_odr
@@ -1312,6 +1320,37 @@ def ugv_receive_thread_task():
 
                             send_hc12(f"DISTANCE:" f"{segment_distance:.2f}")
 
+                            # Jetson 자체 목표거리 정지 보강
+                            # UGV의 T2102 수신 여부와 관계없이 엔코더 거리로 즉시 정지
+                            if (
+                                target_distance_m is not None
+                                and segment_distance >= target_distance_m
+                            ):
+                                arrived_distance = segment_distance
+
+                                mode = "IDLE"
+                                stop_pending = False
+
+                                mission_outbound_total += arrived_distance
+                                return_drive_distance = mission_outbound_total
+                                paused_mission = False
+                                target_distance_m = None
+
+                                stop_ugv_now()
+
+                                send_hc12(f"DISTANCE:{arrived_distance:.2f}")
+                                send_hc12("ARRIVED")
+
+                                print(
+                                    "[목표거리 도착 - Jetson]",
+                                    f"{arrived_distance:.2f} m",
+                                )
+                                print(
+                                    "[도착] RETURN 저장거리:",
+                                    f"{return_drive_distance:.2f} m",
+                                )
+                                print("[도착] ARRIVED - UGV STOP")
+
                         elif stop_pending:
 
                             mission_outbound_total += segment_distance
@@ -1417,11 +1456,19 @@ def ugv_receive_thread_task():
 
                 with state_lock:
 
-                    mode = "IDLE"
+                    # Jetson 엔코더 감시가 이미 ARRIVED 처리한 뒤 늦게 들어온
+                    # T2102라면 거리 중복 누적을 하지 않는다.
+                    already_arrived = target_distance_m is None and mode == "IDLE"
 
+                    mode = "IDLE"
                     stop_pending = False
+                    target_distance_m = None
 
                 stop_ugv_now()
+
+                if already_arrived:
+                    print("[T2102] Jetson에서 이미 목표거리 도착 처리 완료")
+                    continue
 
                 try:
 
