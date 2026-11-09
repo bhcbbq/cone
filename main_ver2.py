@@ -2,7 +2,6 @@ import cv2
 import time
 import threading
 import json
-import math
 import serial
 import numpy as np
 
@@ -45,11 +44,6 @@ ALIGN_STABLE_FRAMES = 8
 HC12_PORT = "/dev/ttyTHS1"
 HC12_BAUD = 115200
 
-# UGV 데모 IMU 전도 감지 기준
-TIP_ANGLE_THRESHOLD_DEG = 60.0
-TIP_HOLD_SECONDS = 0.5
-
-
 # ============================================================
 # SHARED STATE
 # ============================================================
@@ -70,7 +64,7 @@ lane_detected = False
 manual_left_speed = 0.0
 manual_right_speed = 0.0
 
-state_lock = threading.Lock()
+state_lock = threading.RLock()  # 전도 정지와 모터 명령을 같은 상태 잠금으로 보호
 ugv_write_lock = threading.Lock()
 hc12_write_lock = threading.Lock()
 
@@ -123,9 +117,8 @@ paused_return_mode = None
 
 lane_lost_printed = False
 
-# 전도 감지 상태
-tip_started_at = None
-tip_latched = False
+# 하체 T2100의 tipped 상태. None은 아직 보고를 못 받은 상태.
+tip_latched = None
 
 
 # ============================================================
@@ -251,6 +244,18 @@ def hc12_thread_task():
                         continue
 
                     print("[HC12 RX]", cmd)
+
+                    # 전도 상태에서는 새 이동 명령을 받지 않는다. STOP은 항상 허용.
+                    motion_request = cmd in ("START", "RETURN", "RESUME_RETURN") or (
+                        cmd.startswith("MANUAL:") and cmd.split(":", 1)[1].strip().upper() != "STOP"
+                    )
+                    if motion_request:
+                        with state_lock:
+                            tipped = tip_latched is True
+                        if tipped:
+                            send_hc12("STOPPED")
+                            print("[전도 감지] 정상 상태 보고 전 이동 차단")
+                            continue
 
                     # ==================================================
                     # EMERGENCY STOP
@@ -646,6 +651,68 @@ def hc12_thread_task():
 # ============================================================
 
 
+def parse_ugv_feedback(line):
+    """정상 JSON을 파싱하고, T2100 뒤쪽 손상 시 확실한 전도 보고만 살린다."""
+    try:
+        data = json.loads(line)
+        return data if isinstance(data, dict) else {}
+    except ValueError:
+        if not line.startswith("{"):
+            return {}
+        decoder = json.JSONDecoder()
+        remaining = line[1:].lstrip()
+        fields = {}
+        # 문자열 값 안의 'tipped'나 다른 종류 메시지를 전도로 오인하지 않음.
+        while remaining:
+            try:
+                key, end = decoder.raw_decode(remaining)
+                tail = remaining[end:].lstrip()
+                if not isinstance(key, str) or key in fields or not tail.startswith(":"):
+                    break
+                tail = tail[1:].lstrip()
+                value, end = decoder.raw_decode(tail)
+                remaining = tail[end:].lstrip()
+                if not remaining.startswith((",", "}")):
+                    break
+                fields[key] = value
+                if fields.get("T") == 2100 and fields.get("tipped") in (True, 1):
+                    return {"T": 2100, "tipped": True}
+                if not remaining.startswith(","):
+                    break
+                remaining = remaining[1:].lstrip()
+            except ValueError:
+                break
+        return {}
+
+
+def handle_tipped_feedback(data):
+    """main22처럼 ESP32가 판정한 tipped만 사용한다."""
+    global mode, stop_pending, paused_return_mode, tip_latched, align_stable_count
+
+    tipped = data.get("tipped")
+    if not isinstance(tipped, (bool, int)) or tipped not in (0, 1):
+        return  # 필드 누락/오류를 정상으로 간주하지 않음
+
+    with state_lock:
+        if not tipped:
+            if tip_latched is True:
+                mode = "IDLE"  # 정상 자세 복구로 자동 재출발하지 않음
+            tip_latched = False
+            return
+        if tip_latched is True:
+            return  # 같은 전도에서 알림 중복 방지
+        tip_latched = True
+        mode = "IDLE"
+        stop_pending = False
+        paused_return_mode = None
+        align_stable_count = 0
+        stop_ugv_now()
+
+    send_hc12("TIPPED")
+    send_hc12("EMERGENCY")
+    print("[전도 감지] T2100 tipped 수신: UGV 정지 명령 전송")
+
+
 def ugv_receive_thread_task():
 
     global mode
@@ -663,14 +730,12 @@ def ugv_receive_thread_task():
     global return_drive_distance
     global target_distance_m
 
-    global tip_started_at
-    global tip_latched
-
     global return_drive_start_odl
     global return_drive_start_odr
     global paused_return_mode
 
     print("[알림] UGV 수신 스레드 시작")
+    rx_buffer = bytearray()
 
     while is_running:
 
@@ -681,90 +746,40 @@ def ugv_receive_thread_task():
                 time.sleep(0.05)
                 continue
 
-            if not ugv_serial.in_waiting:
-
+            waiting = ugv_serial.in_waiting
+            if waiting:
+                rx_buffer.extend(ugv_serial.read(min(waiting, 2048)))
+            if b"\n" not in rx_buffer:
+                if len(rx_buffer) > 8192:
+                    rx_buffer.clear()
                 time.sleep(0.005)
                 continue
-
-            line = ugv_serial.readline().decode("utf-8", errors="ignore").strip()
+            packet, _, rest = rx_buffer.partition(b"\n")
+            rx_buffer[:] = rest
+            if len(packet) > 8192:
+                continue
+            line = packet.decode("utf-8", errors="replace").strip()
 
             if not line:
                 continue
 
             print("[UGV RX]", line)
 
-            # ========================================================
-            # UGV DEMO T1001
-            # - odl / odr: meter
-            # - r / p / y: radian
-            # - ax / ay / az: IMU acceleration
-            # - v: battery voltage
-            # ========================================================
+            data = parse_ugv_feedback(line)
 
-            if line.startswith('{"T":1001'):
+            # 전도: main22와 같은 T2100 tipped 판정값만 사용.
+            if data.get("T") == 2100:
+                handle_tipped_feedback(data)
+                continue
 
+            # 거리: 기존 main_ver2의 T1001 경로를 유지.
+            if data.get("T") == 1001:
                 try:
-
-                    data = json.loads(line)
-
                     odl = float(data["odl"])
                     odr = float(data["odr"])
-
-                    # 데모 IMU roll / pitch는 radian
-                    roll = float(data.get("r", 0.0))
-                    pitch = float(data.get("p", 0.0))
-
-                except Exception as e:
-
+                except (KeyError, TypeError, ValueError) as e:
                     print("[T1001 오류]", e)
-
                     continue
-
-                # =====================================================
-                # IMU 전도 감지
-                # 60도 이상 기울어진 상태가 0.5초 지속되면 정지
-                # =====================================================
-
-                roll_deg = abs(math.degrees(roll))
-                pitch_deg = abs(math.degrees(pitch))
-                tipped_now = (
-                    roll_deg >= TIP_ANGLE_THRESHOLD_DEG
-                    or pitch_deg >= TIP_ANGLE_THRESHOLD_DEG
-                )
-
-                if tipped_now:
-
-                    if tip_started_at is None:
-                        tip_started_at = time.time()
-
-                    elif (
-                        not tip_latched
-                        and time.time() - tip_started_at >= TIP_HOLD_SECONDS
-                    ):
-
-                        tip_latched = True
-
-                        with state_lock:
-                            mode = "IDLE"
-                            stop_pending = False
-                            paused_return_mode = None
-
-                        stop_ugv_now()
-
-                        # 기존 앱에서 즉시 정지 상태로 처리할 수 있도록 EMERGENCY도 전송
-                        send_hc12("TIPPED")
-                        send_hc12("EMERGENCY")
-
-                        print(
-                            "[전도감지] UGV STOP",
-                            f"roll={roll_deg:.1f}",
-                            f"pitch={pitch_deg:.1f}",
-                        )
-
-                else:
-
-                    tip_started_at = None
-                    tip_latched = False
 
                 with state_lock:
 
@@ -956,6 +971,7 @@ def control_thread_task():
 
         last_time = current_time
 
+        pending_notice = None
         with state_lock:
 
             current_mode = mode
@@ -967,162 +983,169 @@ def control_thread_task():
             current_manual_left = manual_left_speed
             current_manual_right = manual_right_speed
 
-        if current_mode != last_mode:
+            # 수신 스레드가 전도를 알린 뒤 이전 속도 명령이 나가지 않게 함.
+            if tip_latched is True:
+                mode = current_mode = "IDLE"
 
-            previous_error = current_error
-
-            last_mode = current_mode
-
-        # ============================================================
-        # IDLE
-        # ============================================================
-
-        if current_mode == "IDLE":
-
-            with ugv_write_lock:
-
-                ugv_control.send_driving_command(ugv_serial, 0.0, 0.0)
-
-        # ============================================================
-        # MANUAL
-        # 카메라/PID 없이 좌/우 바퀴 직접 제어
-        # ============================================================
-
-        elif current_mode == "MANUAL":
-
-            send_raw_ugv(
-                '{"T":1,'
-                f'"L":{current_manual_left:.3f},'
-                f'"R":{current_manual_right:.3f}'
-                "}"
-            )
-
-        # ============================================================
-        # RETURN_TURN
-        # ============================================================
-
-        elif current_mode == "RETURN_TURN":
-
-            # 좌우 바퀴를 반대 방향으로 돌려 제자리에서 180도 회전
-            send_raw_ugv('{"T":1,' f'"L":{-TURN_SPEED},' f'"R":{TURN_SPEED}' "}")
-
-        # ============================================================
-        # RETURN_ALIGN
-        #
-        # 엔코더로 대충 반대 방향까지 돈 다음
-        # 카메라로 실제 차선 중심을 맞춤
-        # ============================================================
-
-        elif current_mode == "RETURN_ALIGN":
-
-            # --------------------------------------------------------
-            # 차선 검출 성공
-            # --------------------------------------------------------
-
-            if detected:
-
-                lane_lost_printed = False
-
-                print("[RETURN ALIGN]", "error:", f"{current_error:.2f}")
-
-                # 아직 중심과 차이가 큼
-                if abs(current_error) > ALIGN_ERROR_THRESHOLD:
-
-                    align_stable_count = 0
-
-                    # 같은 방향으로 천천히 계속 회전
-                    send_raw_ugv(
-                        '{"T":1,'
-                        f'"L":{-ALIGN_TURN_SPEED},'
-                        f'"R":{ALIGN_TURN_SPEED}'
-                        "}"
-                    )
-
-                # 중앙에 들어옴
-                else:
-
-                    stop_ugv_now()
-
-                    align_stable_count += 1
-
-                    print(
-                        "[RETURN ALIGN] 안정화",
-                        align_stable_count,
-                        "/",
-                        ALIGN_STABLE_FRAMES,
-                    )
-
-                    # 일정 프레임 연속으로 중앙
-                    if align_stable_count >= ALIGN_STABLE_FRAMES:
-
-                        with state_lock:
-
-                            # 이 순간부터 복귀거리 측정
-                            return_drive_start_odl = current_odl
-
-                            return_drive_start_odr = current_odr
-
-                            mode = "RETURN_DRIVE"
-
-                            align_stable_count = 0
-
-                        send_hc12("RETURN_DRIVING")
-
-                        print("[RETURN] 영상 정렬 완료")
-
-                        print("[RETURN] 차선추종 복귀 시작")
-
-            # --------------------------------------------------------
-            # 차선 아직 안 보임
-            # --------------------------------------------------------
-
-            else:
-
-                align_stable_count = 0
-
-                # 같은 방향으로 계속 천천히 회전하면서 탐색
-                send_raw_ugv(
-                    '{"T":1,' f'"L":{-ALIGN_TURN_SPEED},' f'"R":{ALIGN_TURN_SPEED}' "}"
-                )
-
-                if not lane_lost_printed:
-
-                    print("[RETURN ALIGN] 차선 탐색 중...")
-
-                    lane_lost_printed = True
-
-        # ============================================================
-        # DRIVE / RETURN_DRIVE
-        # ============================================================
-
-        elif current_mode in ("DRIVE", "RETURN_DRIVE"):
-
-            if detected:
-
-                angular_z = ugv_control.calculate_pid(current_error, previous_error, dt)
+            if current_mode != last_mode:
 
                 previous_error = current_error
 
-                with ugv_write_lock:
+                last_mode = current_mode
 
-                    ugv_control.send_driving_command(ugv_serial, BASE_SPEED, angular_z)
+            # ============================================================
+            # IDLE
+            # ============================================================
 
-                lane_lost_printed = False
-
-            else:
+            if current_mode == "IDLE":
 
                 with ugv_write_lock:
 
                     ugv_control.send_driving_command(ugv_serial, 0.0, 0.0)
 
-                if not lane_lost_printed:
+            # ============================================================
+            # MANUAL
+            # 카메라/PID 없이 좌/우 바퀴 직접 제어
+            # ============================================================
 
-                    print("[안전정지] 차선을 찾지 못했습니다.")
+            elif current_mode == "MANUAL":
 
-                    send_hc12("LANE_LOST")
+                send_raw_ugv(
+                    '{"T":1,'
+                    f'"L":{current_manual_left:.3f},'
+                    f'"R":{current_manual_right:.3f}'
+                    "}"
+                )
 
-                    lane_lost_printed = True
+            # ============================================================
+            # RETURN_TURN
+            # ============================================================
 
+            elif current_mode == "RETURN_TURN":
+
+                # 좌우 바퀴를 반대 방향으로 돌려 제자리에서 180도 회전
+                send_raw_ugv('{"T":1,' f'"L":{-TURN_SPEED},' f'"R":{TURN_SPEED}' "}")
+
+            # ============================================================
+            # RETURN_ALIGN
+            #
+            # 엔코더로 대충 반대 방향까지 돈 다음
+            # 카메라로 실제 차선 중심을 맞춤
+            # ============================================================
+
+            elif current_mode == "RETURN_ALIGN":
+
+                # --------------------------------------------------------
+                # 차선 검출 성공
+                # --------------------------------------------------------
+
+                if detected:
+
+                    lane_lost_printed = False
+
+                    print("[RETURN ALIGN]", "error:", f"{current_error:.2f}")
+
+                    # 아직 중심과 차이가 큼
+                    if abs(current_error) > ALIGN_ERROR_THRESHOLD:
+
+                        align_stable_count = 0
+
+                        # 같은 방향으로 천천히 계속 회전
+                        send_raw_ugv(
+                            '{"T":1,'
+                            f'"L":{-ALIGN_TURN_SPEED},'
+                            f'"R":{ALIGN_TURN_SPEED}'
+                            "}"
+                        )
+
+                    # 중앙에 들어옴
+                    else:
+
+                        stop_ugv_now()
+
+                        align_stable_count += 1
+
+                        print(
+                            "[RETURN ALIGN] 안정화",
+                            align_stable_count,
+                            "/",
+                            ALIGN_STABLE_FRAMES,
+                        )
+
+                        # 일정 프레임 연속으로 중앙
+                        if align_stable_count >= ALIGN_STABLE_FRAMES:
+
+                            with state_lock:
+
+                                # 이 순간부터 복귀거리 측정
+                                return_drive_start_odl = current_odl
+
+                                return_drive_start_odr = current_odr
+
+                                mode = "RETURN_DRIVE"
+
+                                align_stable_count = 0
+
+                            pending_notice = "RETURN_DRIVING"
+
+                            print("[RETURN] 영상 정렬 완료")
+
+                            print("[RETURN] 차선추종 복귀 시작")
+
+                # --------------------------------------------------------
+                # 차선 아직 안 보임
+                # --------------------------------------------------------
+
+                else:
+
+                    align_stable_count = 0
+
+                    # 같은 방향으로 계속 천천히 회전하면서 탐색
+                    send_raw_ugv(
+                        '{"T":1,' f'"L":{-ALIGN_TURN_SPEED},' f'"R":{ALIGN_TURN_SPEED}' "}"
+                    )
+
+                    if not lane_lost_printed:
+
+                        print("[RETURN ALIGN] 차선 탐색 중...")
+
+                        lane_lost_printed = True
+
+            # ============================================================
+            # DRIVE / RETURN_DRIVE
+            # ============================================================
+
+            elif current_mode in ("DRIVE", "RETURN_DRIVE"):
+
+                if detected:
+
+                    angular_z = ugv_control.calculate_pid(current_error, previous_error, dt)
+
+                    previous_error = current_error
+
+                    with ugv_write_lock:
+
+                        ugv_control.send_driving_command(ugv_serial, BASE_SPEED, angular_z)
+
+                    lane_lost_printed = False
+
+                else:
+
+                    with ugv_write_lock:
+
+                        ugv_control.send_driving_command(ugv_serial, 0.0, 0.0)
+
+                    if not lane_lost_printed:
+
+                        print("[안전정지] 차선을 찾지 못했습니다.")
+
+                        pending_notice = "LANE_LOST"
+
+                        lane_lost_printed = True
+
+
+        if pending_notice is not None:
+            send_hc12(pending_notice)
         time.sleep(0.02)
 
 
