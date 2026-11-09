@@ -1,4 +1,4 @@
-# main_highway_contour_avoid_final_hybrid_optimized..py
+# main_highway_contour_avoid_final_hybrid_optimized.py
 import cv2
 import time
 import threading
@@ -12,8 +12,8 @@ import lane_detection_ver1 as lane_detection
 import ugv_control
 from ultrasonic_reader import UltrasonicReader
 
-
 import json
+
 # --- [전역 변수 추가] ---
 shared_yaw = 0.0
 target_yaw = None  # 회전 목표 각도 저장용
@@ -32,9 +32,6 @@ def ugv_imu_read_task(ugv_serial):
         except Exception:
             pass
         time.sleep(0.005) # CPU 과부하 방지
-
-
-
 
 # ============================================================
 # Configuration
@@ -210,7 +207,7 @@ def control_thread_task(ugv_serial):
     print("[알림] 제어 스레드 시작", flush=True)
     try:
         while is_running:
-            ugv_control.clear_feedback_buffer(ugv_serial)
+            # ugv_control.clear_feedback_buffer(ugv_serial)  # <--- 버퍼 삭제 방지 주석 처리
             now = time.monotonic()
 
             with error_lock:
@@ -311,12 +308,15 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
     # 2. 제자리 회전 (초음파 조건 삭제, IMU 50도 정밀 회전)
     if state == State.AVOID_TURN_OUT:
         if target_yaw is None:
-            # 현재 각도에서 50도 목표값 설정
-            target_yaw = shared_yaw + (avoid_direction.value * 50.0)
+            # 목표 각도를 360도 범위 내로 정규화
+            target_yaw = (shared_yaw + (avoid_direction.value * 50.0)) % 360.0
             
         set_command(0.0, avoid_direction.value * TURN_ANGULAR_SPEED)
         
-        if abs(shared_yaw - target_yaw) <= 2.0:
+        # 현재 각도와 목표 각도의 최단 오차 계산 (-180 ~ 180도 범위)
+        diff = (shared_yaw - target_yaw + 180.0) % 360.0 - 180.0
+        
+        if abs(diff) <= 2.0:
             force_stop()
             target_yaw = None  # 변수 초기화
             transition(State.AVOID_PAUSE)
@@ -361,12 +361,15 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
     # 4. 제자리 정렬 (초기 회전의 반대 방향으로 IMU 50도 역회전)
     if state == State.AVOID_ALIGN:
         if target_yaw is None:
-            # 돌아온 만큼 반대로(-적용) 50도 목표 설정
-            target_yaw = shared_yaw + (-avoid_direction.value * 50.0)
+            # 돌아온 만큼 반대로(-적용) 목표 설정 및 정규화
+            target_yaw = (shared_yaw + (-avoid_direction.value * 50.0)) % 360.0
             
         set_command(0.0, -avoid_direction.value * TURN_ANGULAR_SPEED)
         
-        if abs(shared_yaw - target_yaw) <= 2.0:
+        # 최단 오차 계산
+        diff = (shared_yaw - target_yaw + 180.0) % 360.0 - 180.0
+        
+        if abs(diff) <= 2.0:
             force_stop()
             target_yaw = None
             transition(State.AVOID_FORWARD)
@@ -401,6 +404,7 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
             print("[에러] 타임아웃: 차선을 찾지 못했습니다.", flush=True)
             transition(State.LANE_FOLLOWING)
         return
+
 # ============================================================
 # Main Loop
 # ============================================================
@@ -417,12 +421,14 @@ def main():
     try:
         ugv_serial = ugv_control.init_ugv(port=UGV_PORT, baudrate=SERIAL_BAUD)
         ugv_control.send_driving_command(ugv_serial, 0.0, 0.0)
-# --- [추가된 부분: IMU 연속 피드백 켜기 및 읽기 스레드 시작] ---
+
+        # --- [추가된 부분: IMU 연속 피드백 켜기 및 읽기 스레드 시작] ---
         ugv_serial.write(b'{"T":131, "cmd":1}\n')
         
         imu_thread = threading.Thread(target=ugv_imu_read_task, args=(ugv_serial,), daemon=True)
         imu_thread.start()
         # -------------------------------------------------------------
+        
         ultrasonic = create_ultrasonic_reader()
         time.sleep(0.5)
 
@@ -463,7 +469,7 @@ def main():
             now = time.monotonic()
             if now - report_time >= TERMINAL_LOG_INTERVAL_S:
                 usable = (bool(is_detected) and now - frame_started <= FRAME_TIMEOUT)
-                print(f"[MONITOR] State: {state.name:<18} | US Front: {front_d:5.1f}cm | US Side: {left_d:5.1f} / {right_d:5.1f} | Error: {error:+.1f} | Usable: {usable}", flush=True)
+                print(f"[MONITOR] State: {state.name:<18} | US Front: {front_d:5.1f}cm | US Side: {left_d:5.1f} / {right_d:5.1f} | Yaw: {shared_yaw:5.1f} | Error: {error:+.1f}", flush=True)
                 report_time = now
 
             if SHOW_WINDOWS:
