@@ -21,19 +21,32 @@ target_yaw = None  # 회전 목표 각도 저장용
 # --- [IMU 수신 스레드 함수 추가] ---
 def ugv_imu_read_task(ugv_serial):
     global shared_yaw, is_running
+    buffer = ""
     while is_running:
-        # 변경점: if 대신 while을 사용하여 버퍼에 쌓인 밀린 데이터를 즉시 모두 소진
-        while ugv_serial.in_waiting > 0:
-            try:
-                line = ugv_serial.readline().decode('utf-8', errors='ignore').strip()
-                if line and '"yaw"' in line:
-                    data = json.loads(line)
-                    if "yaw" in data:
-                        shared_yaw = float(data["yaw"])
-            except Exception:
-                pass # JSON 파싱 에러 등 깨진 데이터가 있어도 무시하고 다음 줄을 읽음
+        try:
+            waiting = ugv_serial.in_waiting
+            if waiting > 0:
+                # 1. 뭉쳐있는 수천 바이트의 데이터를 한 번에 즉시 긁어옴 (병목 제거)
+                raw_data = ugv_serial.read(waiting).decode('utf-8', errors='ignore')
+                buffer += raw_data
                 
-        time.sleep(0.005) # CPU 과부하 방지dd
+                if '\n' in buffer:
+                    lines = buffer.split('\n')
+                    buffer = lines[-1]  # 잘린 마지막 줄만 다음을 위해 남겨둠
+                    
+                    # 2. 리스트를 뒤에서부터(가장 최신 데이터부터) 거꾸로 확인
+                    for line in reversed(lines[:-1]):
+                        if '"yaw"' in line:
+                            try:
+                                data = json.loads(line.strip())
+                                if "yaw" in data:
+                                    shared_yaw = float(data["yaw"])
+                                    break  # 최신값을 하나 찾았으면 낡은 과거 데이터는 즉시 폐기하고 탈출
+                            except Exception:
+                                continue
+        except Exception:
+            pass
+        time.sleep(0.005)
 
 # ============================================================
 # Configuration
