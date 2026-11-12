@@ -16,8 +16,8 @@ import json
 
 # IMU yaw unit MUST match the firmware output: "deg" or "rad".
 # Original program assumed degrees; retained as default (do not infer from a still image).
-IMU_YAW_UNIT = "deg"
-TURN_ANGLE_DEG = 50.0
+IMU_YAW_UNIT = "rad"
+TURN_ANGLE_DEG = 25.0
 TURN_TOLERANCE_DEG = 2.0
 TURN_KP = 0.035
 TURN_MIN_SPEED = 0.18
