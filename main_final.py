@@ -1,5 +1,4 @@
 import cv2
-import os
 import time
 import threading
 import json
@@ -13,13 +12,6 @@ import ugv_control
 # ============================================================
 
 BASE_SPEED = 0.30
-
-# 로컬 데스크톱(VNC 포함)에서만 표시. SSH의 X11 전달도 표시하지 않음.
-SHOW_WINDOWS = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")) and not any(
-    os.environ.get(name) for name in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY")
-)
-LANE_WINDOW = "Smart Cone - Lane Tracking"
-CANNY_WINDOW = "Smart Cone - Raw Canny | Lane ROI"
 
 # 수동 주행 전용 속도
 # 앱 수동 페이지의 슬라이더(SPEED:0.20 ~ 0.50)로 변경
@@ -105,8 +97,8 @@ def lane_edges(frame):
         [
             [
                 (int(width * 0.05), int(height * 0.96)),
-                (int(width * 0.05), int(height * 0.10)),
-                (int(width * 0.95), int(height * 0.10)),
+                (int(width * 0.40), int(height * 0.66)),
+                (int(width * 0.60), int(height * 0.66)),
                 (int(width * 0.95), int(height * 0.96)),
             ]
         ],
@@ -1296,8 +1288,13 @@ def ugv_receive_thread_task():
 
                 else:
 
-                    # 다시 정상 자세가 되면 다음 전도 감지를 허용
-                    tipped_notified = False
+                     # 전도 상태였다가 정상 자세로 돌아온 순간
+                     if tipped_notified:
+                         send_hc12("TIPPED_CLEAR")
+                         print("[전도 해제] 정상 자세 복귀")
+                         print("[전도 해제] 앱으로 TIPPED_CLEAR 전송")
+
+                     tipped_notified = False
 
                 with state_lock:
 
@@ -1792,13 +1789,6 @@ if __name__ == "__main__":
         # lane_detection_ver2 추적기
         lane_tracker = LaneTracker()
 
-        if SHOW_WINDOWS:
-            cv2.namedWindow(LANE_WINDOW, cv2.WINDOW_NORMAL)
-            cv2.namedWindow(CANNY_WINDOW, cv2.WINDOW_NORMAL)
-            print("[화면] 차선 인식과 Canny 표시. Q 또는 Esc로 종료.")
-        else:
-            print("[화면] SSH 또는 디스플레이 없는 환경: 화면 출력 끔.")
-
         # ============================================================
         # THREADS
         # ============================================================
@@ -1866,15 +1856,17 @@ if __name__ == "__main__":
 
                 lane_detected = is_detected
 
-            if SHOW_WINDOWS:
-                # 왼쪽: 전체 Canny / 오른쪽: 색상 필터와 ROI 적용 후 차선 검출용 에지
-                canny_view = np.hstack((raw_edges, lane_edge_image))
-                cv2.imshow(LANE_WINDOW, result_image)
-                cv2.imshow(CANNY_WINDOW, canny_view)
-
-                key = cv2.waitKey(1) & 0xFF
-                if key in (ord("q"), ord("Q"), 27):
-                    break
+            # SSH 환경에서는 GUI 끔
+            #
+            # 필요하면:
+            #
+            # cv2.imshow(
+            #     "Smart Cone",
+            #     result_image
+            # )
+            #
+            # if cv2.waitKey(1) & 0xFF == ord("q"):
+            #     break
 
     except KeyboardInterrupt:
 
@@ -1926,7 +1918,6 @@ if __name__ == "__main__":
         except Exception:
             pass
 
-        if SHOW_WINDOWS:
-            cv2.destroyAllWindows()
+        cv2.destroyAllWindows()
 
         print("[종료] 완료")

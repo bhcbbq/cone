@@ -41,8 +41,8 @@ def lane_edges(frame):
 
     vertices = np.array([[
         (int(width * 0.05), int(height * 0.96)),
-        (int(width * 0.40), int(height * 0.66)),
-        (int(width * 0.60), int(height * 0.66)),
+        (int(width * 0.05), int(height * 0.10)),
+        (int(width * 0.95), int(height * 0.10)),
         (int(width * 0.95), int(height * 0.96)),
     ]], dtype=np.int32)
 
@@ -93,7 +93,7 @@ class LaneTracker:
                 a * y_bottom + b,
             ])
 
-            if not -width * 0.10 < ends[1] < width * 1.10:
+            if not -width * 0.01 < ends[1] < width * 1.0:
                 continue
 
             if self.pair is None:
@@ -246,7 +246,7 @@ class LaneTracker:
             for right_score, right in right_candidates:
                 widths = right - left
 
-                if not width * 0.12 < widths[1] < width * 1.05:
+                if not width * 0.12 < widths[1] < width * 1.30:
                     continue
 
                 if not (

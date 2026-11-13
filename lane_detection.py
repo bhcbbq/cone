@@ -1,6 +1,15 @@
 import cv2
 import numpy as np
 import math
+import time
+
+SINGLE_LANE_TIMEOUT = 5.0
+LANE_LINE_THICKNESS = 2
+
+# 위쪽과 아래쪽의 차선 폭을 각각 픽셀 단위로 저장합니다.
+_lane_width = None
+_frame_size = None
+_last_both_seen = None
 
 def region_of_interest(img, vertices):
     """
@@ -15,7 +24,15 @@ def calculate_steering(frame, lines):
     [오차 계산 함수] 
     차선 분석 후 (error, frame, is_detected) 형태로 반환합니다.
     """
+    global _lane_width, _frame_size, _last_both_seen
+
     height, width = frame.shape[:2]
+    if _frame_size != (width, height):
+        _frame_size = (width, height)
+        _lane_width = None
+        _last_both_seen = None
+
+    now = time.monotonic()
     camera_center = width // 2
 
     # 1. 허프 변환에서 선 자체가 하나도 안 잡힌 경우 -> 즉시 정지
@@ -51,13 +68,13 @@ def calculate_steering(frame, lines):
         poly_left = np.polyfit(left_line_y, left_line_x, 1) 
         left_x_bottom = int(np.polyval(poly_left, y_bottom))
         left_x_top = int(np.polyval(poly_left, y_top))
-        cv2.line(frame, (left_x_bottom, y_bottom), (left_x_top, y_top), (0, 255, 0), 6)
+        cv2.line(frame, (left_x_bottom, y_bottom), (left_x_top, y_top), (0, 255, 0), LANE_LINE_THICKNESS)
         
     if len(right_line_x) > 0:
         poly_right = np.polyfit(right_line_y, right_line_x, 1)
         right_x_bottom = int(np.polyval(poly_right, y_bottom))
         right_x_top = int(np.polyval(poly_right, y_top))
-        cv2.line(frame, (right_x_bottom, y_bottom), (right_x_top, y_top), (0, 255, 0), 6)
+        cv2.line(frame, (right_x_bottom, y_bottom), (right_x_top, y_top), (0, 255, 0), LANE_LINE_THICKNESS)
 
     # 2. 좌/우 유효한 차선이 하나도 계산되지 않은 경우 -> 즉시 정지
     if left_x_bottom is None and right_x_bottom is None:
@@ -65,17 +82,41 @@ def calculate_steering(frame, lines):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
         return 0, frame, False
 
-    # 3. 양쪽 차선이 모두 있는 경우 (정상 주행)
+    # 3. 양쪽 차선이 보일 때만 높이별 차선 폭을 갱신합니다.
     if left_x_bottom is not None and right_x_bottom is not None:
-        lane_center_bottom = (left_x_bottom + right_x_bottom) // 2
-        lane_center_top = (left_x_top + right_x_top) // 2
-    # 4. 한쪽 차선만 인식된 경우 (반대편 차선 간격을 가정한 보정 주행)
-    elif left_x_bottom is not None:
-        lane_center_bottom = left_x_bottom + 160  # 표준 도로 폭의 절반 가정
-        lane_center_top = left_x_top + 160
+        width_top = right_x_top - left_x_top
+        width_bottom = right_x_bottom - left_x_bottom
+        if width_top <= 0 or width_bottom <= 0:
+            cv2.putText(frame, "STATUS: Invalid Lane Pair (STOPPED)", (30, 90),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+            return 0, frame, False
+        _lane_width = (width_top, width_bottom)
+        _last_both_seen = now
+    # 4. 한쪽만 보일 때 저장된 폭으로 반대쪽 차선을 그립니다.
     else:
-        lane_center_bottom = right_x_bottom - 160
-        lane_center_top = right_x_top - 160
+        if _lane_width is None:
+            cv2.putText(frame, "STATUS: Need Both Lanes (STOPPED)", (30, 90),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+            return 0, frame, False
+
+        # 실제 양쪽 차선을 마지막으로 검출한 때부터 시간을 셉니다.
+        if now - _last_both_seen >= SINGLE_LANE_TIMEOUT:
+            cv2.putText(frame, "STATUS: Single Lane Timeout (STOPPED)", (30, 90),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+            return 0, frame, False
+
+        width_top, width_bottom = _lane_width
+        if left_x_bottom is not None:
+            right_x_top = left_x_top + width_top
+            right_x_bottom = left_x_bottom + width_bottom
+            cv2.line(frame, (right_x_bottom, y_bottom), (right_x_top, y_top), (0, 165, 255), LANE_LINE_THICKNESS)
+        else:
+            left_x_top = right_x_top - width_top
+            left_x_bottom = right_x_bottom - width_bottom
+            cv2.line(frame, (left_x_bottom, y_bottom), (left_x_top, y_top), (0, 165, 255), LANE_LINE_THICKNESS)
+
+    lane_center_bottom = (left_x_bottom + right_x_bottom) // 2
+    lane_center_top = (left_x_top + right_x_top) // 2
 
     cv2.line(frame, (lane_center_bottom, y_bottom), (lane_center_top, y_top), (0, 255, 255), 3)
 

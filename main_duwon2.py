@@ -326,8 +326,8 @@ def lane_edges(frame):
         [
             [
                 (int(width * 0.05), int(height * 0.96)),
-                (int(width * 0.25), int(height * 0.40)),
-                (int(width * 0.75), int(height * 0.40)),
+                (int(width * 0.05), int(height * 0.10)),
+                (int(width * 0.95), int(height * 0.10)),
                 (int(width * 0.95), int(height * 0.96)),
             ]
         ],
