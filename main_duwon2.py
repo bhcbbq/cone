@@ -539,11 +539,11 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
             transition(State.AVOID_DIAGONAL)
         return
 
-    # 3. 대각선 전진 (통과 후 10cm 여유 마진 주행 추가)
+    # 3. 대각선 전진 (통과 후 40cm 여유 마진 주행 추가)
     if state == State.AVOID_DIAGONAL:
         side_d = right_d if avoid_direction == AvoidDirection.LEFT else left_d
         
-        # 10cm 여유 마진 타이머용 내부 변수 초기화
+        # 40cm 여유 마진 타이머용 내부 변수 초기화
         if not hasattr(run_fsm, 'clear_time'):
             run_fsm.clear_time = None
 
@@ -552,15 +552,15 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
                 force_stop()
                 print(f"[위험] 측면 장애물 초근접! ({side_d:.1f}cm) -> 충돌 방지 대기", flush=True)
             elif side_d >= SIDE_CLEAR_CM or side_d < 0:
-                # 장애물을 벗어났을 때 (또는 센서 범위를 벗어나 -1이 뜰 때) 20cm 카운트 시작
+                # 장애물을 벗어났을 때 (또는 센서 범위를 벗어나 -1이 뜰 때) 40cm 카운트 시작
                 run_fsm.clear_time = time.monotonic()
-                print("[통과] 측면 클리어 -> 추가 20cm 마진 전진 시작", flush=True)
+                print("[통과] 측면 클리어 -> 추가 40cm 마진 전진 시작", flush=True)
             else:
                 set_command(AVOID_SPEED, 0.0)
         else:
             set_command(AVOID_SPEED, 0.0)
-            # AVOID_SPEED 속도로 20cm(0.2m)를 가는 데 걸리는 시간 계산
-            extra_time = 0.20 / AVOID_SPEED 
+            # AVOID_SPEED 속도로 40cm(0.4m)를 가는 데 걸리는 시간 계산
+            extra_time = 0.40 / AVOID_SPEED 
             
             if time.monotonic() - run_fsm.clear_time >= extra_time:
                 force_stop()
