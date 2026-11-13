@@ -16,28 +16,7 @@ def lane_edges(frame):
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     raw_edges = cv2.Canny(blurred, 50, 150)
 
-    hls = cv2.cvtColor(frame, cv2.COLOR_BGR2HLS)
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-
-    white = cv2.inRange(
-        hls,
-        (0, 150, 0),
-        (180, 255, 150),
-    )
-
-    yellow = cv2.inRange(
-        hsv,
-        (15, 65, 70),
-        (40, 255, 255),
-    )
-
-    colors = cv2.dilate(
-        white | yellow,
-        np.ones((5, 5), np.uint8),
-    )
-
-    edges = cv2.bitwise_and(raw_edges, colors)
-    mask = np.zeros_like(edges)
+    mask = np.zeros_like(raw_edges)
 
     vertices = np.array([[
         (int(width * 0.05), int(height * 0.96)),
@@ -47,7 +26,7 @@ def lane_edges(frame):
     ]], dtype=np.int32)
 
     cv2.fillPoly(mask, vertices, 255)
-    lane_edge_image = cv2.bitwise_and(edges, mask)
+    lane_edge_image = cv2.bitwise_and(raw_edges, mask)
 
     return raw_edges, lane_edge_image
 
