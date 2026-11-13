@@ -8,7 +8,7 @@ import numpy as np
 import os
 from enum import Enum, auto
 
-import lane_detection_ver1 as lane_detection
+import lane_detection_ver2 as lane_detection
 import ugv_control
 from ultrasonic_reader import UltrasonicReader
 
@@ -260,12 +260,22 @@ def gstreamer_pipeline(sensor_id=0, capture_width=1640, capture_height=1232, dis
     )
 
 def process_lane_frame(frame, tracker, now):
-    target_height = max(2, round(frame.shape[0] * FRAME_WIDTH / frame.shape[1]))
-    frame = cv2.resize(frame, (FRAME_WIDTH, target_height))
-    raw_edges, edges, top, bottom = lane_detection.get_edges(frame, return_raw=True)
-    pair, status, inferred = tracker.update(edges, top, bottom, now)
-    result_image, error, is_detected = lane_detection.draw_result(frame.copy(), pair, status, inferred, top, bottom)
-    return error, result_image, is_detected, pair, raw_edges, edges
+    original_width = frame.shape[1]
+    target_height = max(2, round(frame.shape[0] * FRAME_WIDTH / original_width))
+    resized = cv2.resize(frame, (FRAME_WIDTH, target_height))
+    raw_edges, edges = lane_detection.lane_edges(resized)
+    pair, status = tracker.update(edges, now)
+    result_image, error, is_detected = lane_detection.draw_result(resized.copy(), pair, status)
+
+    # ver2의 x 좌표 두 점을 기존 회피 함수의 x(y_norm) 계수로 변환한다.
+    # ver2 기준 높이: 화면 위에서 76%, 94%. 회피 함수는 원본 영상의 x 좌표를 사용한다.
+    avoidance_pair = None
+    if pair is not None:
+        y_top, y_bottom = 0.76, 0.94
+        slope = (pair[:, 1] - pair[:, 0]) / (y_bottom - y_top)
+        intercept = pair[:, 0] - slope * y_top
+        avoidance_pair = np.column_stack((slope, intercept)) * (original_width / resized.shape[1])
+    return error, result_image, is_detected, avoidance_pair, raw_edges, edges
 
 def get_obstacle_direction_by_contour(frame, pair):
     if pair is None or len(pair) < 2:
@@ -518,10 +528,6 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
 # ============================================================
 def main():
     global is_running, shared_frame_time, control_failure
-
-    if lane_detection.ROAD_MODE not in ("highway", "black_track"):
-        print("[에러] ROAD_MODE 설정을 확인하세요.", flush=True)
-        return
 
     ugv_serial = ultrasonic = cap = control_thread = imu_thread = None
     window_name = "UGV - Autonomous Avoidance"
