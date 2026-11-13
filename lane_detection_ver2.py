@@ -19,10 +19,10 @@ def lane_edges(frame):
     mask = np.zeros_like(raw_edges)
 
     vertices = np.array([[
-        (int(width * 0.05), int(height * 0.96)),
-        (int(width * 0.25), int(height * 0.40)),
-        (int(width * 0.75), int(height * 0.40)),
-        (int(width * 0.95), int(height * 0.96)),
+         (int(width * 0.01), int(height * 0.99)),  # 왼쪽 아래: 가로 5%, 세로 96%
+         (int(width * 0.01), int(height * 0.40)),  # 왼쪽 위:   가로 25%, 세로 40%
+         (int(width * 0.99), int(height * 0.40)),  # 오른쪽 위: 가로 75%, 세로 40%
+         (int(width * 0.99), int(height * 0.99)),  # 오른쪽 아래: 가로 95%, 세로 96%
     ]], dtype=np.int32)
 
     cv2.fillPoly(mask, vertices, 255)
