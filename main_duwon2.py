@@ -177,7 +177,7 @@ PASS_SPEED = 0.40             # m/s (대각선 및 직진 통과)
 # 거리 기반 회피 조건 파라미터
 FRONT_STOP_CM = 70.0         # 회피 시작 기준 거리 (전방 장애물 인식)
 FRONT_SAFE_CM = 70.0          # 회전 시 전방이 70cm 이상 확보되어야 회전 완료
-SIDE_DANGER_CM = 30.0         # 측면 30cm 미만일 경우 너무 가까워 임시 정지
+SIDE_DANGER_CM = 28.0         # 측면 28cm 미만일 경우 너무 가까워 임시 정지
 SIDE_CLEAR_CM = 50.0          # 측면 50cm 이상 멀어지면 장애물을 통과했다고 판단X
 
 ALIGN_TIME_S = 1.6
@@ -539,11 +539,11 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
             transition(State.AVOID_DIAGONAL)
         return
 
-    # 3. 대각선 전진 (통과 후 40cm 여유 마진 주행 추가)
+    # 3. 대각선 전진 (통과 후 60cm 여유 마진 주행 추가)
     if state == State.AVOID_DIAGONAL:
         side_d = right_d if avoid_direction == AvoidDirection.LEFT else left_d
         
-        # 40cm 여유 마진 타이머용 내부 변수 초기화
+        # 60cm 여유 마진 타이머용 내부 변수 초기화
         if not hasattr(run_fsm, 'clear_time'):
             run_fsm.clear_time = None
 
@@ -552,9 +552,9 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
                 force_stop()
                 print(f"[위험] 측면 장애물 초근접! ({side_d:.1f}cm) -> 충돌 방지 대기", flush=True)
             elif side_d >= SIDE_CLEAR_CM or side_d < 0:
-                # 장애물을 벗어났을 때 (또는 센서 범위를 벗어나 -1이 뜰 때) 40cm 카운트 시작
+                # 장애물을 벗어났을 때 (또는 센서 범위를 벗어나 -1이 뜰 때) 60cm 카운트 시작
                 run_fsm.clear_time = time.monotonic()
-                print("[통과] 측면 클리어 -> 추가 40cm 마진 전진 시작", flush=True)
+                print("[통과] 측면 클리어 -> 추가 60cm 마진 전진 시작", flush=True)
             else:
                 set_command(AVOID_SPEED, 0.0)
         else:
