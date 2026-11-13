@@ -290,60 +290,16 @@ def gstreamer_pipeline(
         )
     )
 
-# main_final.py와 동일한 색상 필터 및 차선 ROI.
+# 차선 모듈에 설정된 ROI를 사용합니다.
 def lane_edges(frame):
-    """전체 Canny 영상과 차선 검출용 에지를 반환합니다."""
-    height, width = frame.shape[:2]
-
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    raw_edges = cv2.Canny(blurred, 50, 150)
-
-    hls = cv2.cvtColor(frame, cv2.COLOR_BGR2HLS)
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-
-    white = cv2.inRange(
-        hls,
-        (0, 150, 0),
-        (180, 255, 150),
-    )
-
-    yellow = cv2.inRange(
-        hsv,
-        (15, 65, 70),
-        (40, 255, 255),
-    )
-
-    colors = cv2.dilate(
-        white | yellow,
-        np.ones((5, 5), np.uint8),
-    )
-
-    edges = cv2.bitwise_and(raw_edges, colors)
-    mask = np.zeros_like(edges)
-
-    vertices = np.array(
-        [
-            [
-                (int(width * 0.05), int(height * 0.96)),
-                (int(width * 0.05), int(height * 0.10)),
-                (int(width * 0.95), int(height * 0.10)),
-                (int(width * 0.95), int(height * 0.96)),
-            ]
-        ],
-        dtype=np.int32,
-    )
-
-    cv2.fillPoly(mask, vertices, 255)
-    lane_edge_image = cv2.bitwise_and(edges, mask)
-
-    return raw_edges, lane_edge_image
+    """차선 모듈의 Canny 및 ROI 처리를 사용합니다."""
+    return lane_detection.lane_edges(frame)
 
 
 def process_lane_frame(frame, tracker, now):
     # main_final과 같은 카메라 프레임을 리사이즈 없이 처리한다.
     raw_edges, edges = lane_edges(frame)
-    pair, status = tracker.update(edges, now)
+    pair, status = tracker.update(edges, now, frame=frame)
     result_image, error, is_detected = lane_detection.draw_result(frame.copy(), pair, status)
 
     # 회피 함수가 사용하는 x(y_norm) 형식으로만 변환한다.
@@ -671,7 +627,7 @@ def main():
                 report_time = now
 
             if SHOW_WINDOWS:
-                # 왼쪽: 전체 Canny / 오른쪽: 색상 필터와 ROI 적용 후 차선 검출용 에지
+                # 왼쪽: 전체 Canny / 오른쪽: ROI 적용 후 차선 검출용 에지
                 canny_view = np.hstack((raw_edges, lane_edges))
                 cv2.imshow(LANE_WINDOW, result_image)
                 cv2.imshow(CANNY_WINDOW, canny_view)
