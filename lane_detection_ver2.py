@@ -93,7 +93,7 @@ class LaneTracker:
                 a * y_bottom + b,
             ])
 
-            if not -width * 0.15 < ends[1] < width * 1.15:
+            if not -width * 0.01 < ends[1] < width * 1.0:
                 continue
 
             if self.pair is None:
