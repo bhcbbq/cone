@@ -176,7 +176,7 @@ AVOID_SPEED = 0.15            # m/s
 PASS_SPEED = 0.40             # m/s (대각선 및 직진 통과)
 
 # 거리 기반 회피 조건 파라미터
-FRONT_STOP_CM = 60.0         # 회피 시작 기준 거리 (전방 장애물 인식)
+FRONT_STOP_CM = 70.0         # 회피 시작 기준 거리 (전방 장애물 인식)
 FRONT_SAFE_CM = 70.0          # 회전 시 전방이 70cm 이상 확보되어야 회전 완료
 SIDE_DANGER_CM = 30.0         # 측면 30cm 미만일 경우 너무 가까워 임시 정지
 SIDE_CLEAR_CM = 50.0          # 측면 50cm 이상 멀어지면 장애물을 통과했다고 판단X
