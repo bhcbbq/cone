@@ -2,6 +2,7 @@ import cv2
 import time
 import threading
 import json
+import os
 import serial
 import numpy as np
 
@@ -1738,6 +1739,10 @@ def gstreamer_pipeline(
 
 if __name__ == "__main__":
 
+    show_windows = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")) and not any(
+        os.environ.get(name) for name in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY")
+    )
+
     try:
 
         # ============================================================
@@ -1856,17 +1861,13 @@ if __name__ == "__main__":
 
                 lane_detected = is_detected
 
-            # SSH 환경에서는 GUI 끔
-            #
-            # 필요하면:
-            #
-            # cv2.imshow(
-            #     "Smart Cone",
-            #     result_image
-            # )
-            #
-            # if cv2.waitKey(1) & 0xFF == ord("q"):
-            #     break
+            if show_windows:
+                cv2.imshow("Smart Cone - Lane Tracking", result_image)
+                cv2.imshow(
+                    "Smart Cone - Raw Canny | Lane ROI",
+                    np.hstack((raw_edges, lane_edge_image)),
+                )
+                cv2.waitKey(1)
 
     except KeyboardInterrupt:
 
@@ -1918,6 +1919,7 @@ if __name__ == "__main__":
         except Exception:
             pass
 
-        cv2.destroyAllWindows()
+        if show_windows:
+            cv2.destroyAllWindows()
 
         print("[종료] 완료")
