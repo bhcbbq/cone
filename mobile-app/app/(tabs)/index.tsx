@@ -11,11 +11,6 @@ import {
 
 
   Platform,
-
-
-
-  Alert,
-
 } from 'react-native';
 
 
@@ -486,6 +481,13 @@ export default function HomeScreen() {
 
 
   ] = useState<RobotStatus>('idle');
+
+  // 전도 상태 팝업 표시 여부
+  const [
+    tippedVisible,
+    setTippedVisible,
+  ] = useState(false);
+
 
 
   // =========================
@@ -1414,12 +1416,19 @@ export default function HomeScreen() {
 
     if (message === 'TIPPED') {
 
+      // 전도 중에는 팝업을 계속 유지
       setRobotStatus('stopped');
+      setTippedVisible(true);
 
-      Alert.alert(
-        '전도 감지',
-        '라바콘이 넘어졌습니다.'
-      );
+      return;
+
+    }
+
+    if (message === 'TIPPED_CLEAR') {
+
+      // 정상 자세로 돌아오면 팝업만 자동으로 닫는다.
+      // 자동 재출발은 하지 않는다.
+      setTippedVisible(false);
 
       return;
 
@@ -3637,6 +3646,12 @@ export default function HomeScreen() {
       }
 
 
+
+
+
+      tippedVisible={
+        tippedVisible
+      }
 
     />
 

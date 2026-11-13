@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 
 import {
   ActivityIndicator,
+  Modal,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -112,6 +113,9 @@ interface Props {
   // 이후 실제 수동 주행 명령 연결용 (지금은 넘기지 않아도 UI만 동작)
   onManualPress?: (direction: ManualDirection) => void;
   onManualRelease?: () => void;
+
+  // UGV 전도 상태 커스텀 팝업
+  tippedVisible?: boolean;
 }
 
 export function RobotControlScreen({
@@ -144,6 +148,7 @@ export function RobotControlScreen({
   batteryPercent,
   onManualPress,
   onManualRelease,
+  tippedVisible = false,
 }: Props) {
   const { width: screenWidth } = useWindowDimensions();
 
@@ -1071,6 +1076,50 @@ export function RobotControlScreen({
           </ScrollView>
         </View>
       </ScrollView>
+
+      {/* =========================
+          전도 감지 팝업
+      ========================= */}
+      <Modal
+        visible={tippedVisible}
+        transparent
+        animationType="fade"
+        statusBarTranslucent
+        onRequestClose={() => { }}
+      >
+        <View style={styles.tippedOverlay}>
+          <View style={styles.tippedCard}>
+            <View style={styles.tippedIconBox}>
+              <Ionicons
+                name="warning-outline"
+                size={34}
+                color={colors.danger}
+              />
+            </View>
+
+            <Text style={styles.tippedEyebrow}>
+              SAFETY ALERT
+            </Text>
+
+            <Text style={styles.tippedTitle}>
+              전도 감지
+            </Text>
+
+            <Text style={styles.tippedDescription}>
+              라바콘이 넘어졌습니다.{`\n`}
+              기기를 정상 위치로 세워주세요.
+            </Text>
+
+            <View style={styles.tippedStatusBox}>
+              <View style={styles.tippedStatusDot} />
+
+              <Text style={styles.tippedStatusText}>
+                정상 상태가 확인되면 자동으로 닫힙니다.
+              </Text>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -1109,8 +1158,8 @@ const styles = StyleSheet.create({
   // =========================
 
   header: {
-    paddingTop: 24,
-    marginBottom: spacing.md,
+    paddingTop: 12,
+    marginBottom: 8,
   },
 
   headerTop: {
@@ -1327,7 +1376,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: spacing.md,
+    marginBottom: 8,
   },
 
   pageDots: {
@@ -1364,8 +1413,7 @@ const styles = StyleSheet.create({
   // =========================
 
   section: {
-    marginBottom:
-      spacing.md,
+    marginBottom: 8,
   },
 
   // 목표 거리 / 주행 속도 / 수동 조작 카드 공통 제목
@@ -1379,7 +1427,7 @@ const styles = StyleSheet.create({
   },
 
   bottomSpacer: {
-    height: 170,
+    height: 20,
   },
 
   // =========================
@@ -1579,6 +1627,109 @@ const styles = StyleSheet.create({
 
   manualDisabled: {
     opacity: 0.35,
+  },
+
+
+  // =========================
+  // TIPPED MODAL
+  // =========================
+
+  tippedOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 23, 42, 0.48)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: spacing.lg,
+  },
+
+  tippedCard: {
+    width: '100%',
+    maxWidth: 380,
+    backgroundColor: colors.white,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 24,
+    paddingHorizontal: 24,
+    paddingTop: 26,
+    paddingBottom: 22,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.14,
+    shadowRadius: 14,
+    elevation: 8,
+  },
+
+  tippedIconBox: {
+    width: 68,
+    height: 68,
+    borderRadius: 22,
+    backgroundColor: colors.statusStoppedSoft,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 16,
+  },
+
+  tippedEyebrow: {
+    ...typography.caption,
+    color: colors.danger,
+    fontSize: 11,
+    lineHeight: 15,
+    fontWeight: '800',
+    letterSpacing: 1.2,
+    includeFontPadding: false,
+    marginBottom: 6,
+  },
+
+  tippedTitle: {
+    ...typography.h1,
+    color: colors.textPrimary,
+    fontSize: 24,
+    lineHeight: 30,
+    fontWeight: '800',
+    includeFontPadding: false,
+  },
+
+  tippedDescription: {
+    ...typography.caption,
+    color: colors.textMuted,
+    fontSize: 14,
+    lineHeight: 22,
+    textAlign: 'center',
+    includeFontPadding: false,
+    marginTop: 10,
+  },
+
+  tippedStatusBox: {
+    width: '100%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.surfaceMuted,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 18,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginTop: 20,
+  },
+
+  tippedStatusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: colors.danger,
+    marginRight: 8,
+  },
+
+  tippedStatusText: {
+    ...typography.caption,
+    flexShrink: 1,
+    color: colors.textSecondary,
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: '700',
+    includeFontPadding: false,
   },
 
 });
