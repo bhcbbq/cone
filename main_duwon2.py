@@ -187,9 +187,11 @@ CONTROL_PERIOD_S = 0.02
 NO_OBSTACLE = -1.0
 TERMINAL_LOG_INTERVAL_S = 1.0
 
-SHOW_WINDOWS = bool(os.environ.get("DISPLAY")) and not bool(
-    os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_CLIENT") or os.environ.get("SSH_TTY")
+SHOW_WINDOWS = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")) and not any(
+    os.environ.get(name) for name in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY")
 )
+LANE_WINDOW = "Smart Cone - Lane Tracking"
+CANNY_WINDOW = "Smart Cone - Raw Canny | Lane ROI"
 
 # ============================================================
 # FSM State & Direction
@@ -607,8 +609,6 @@ def main():
     global is_running, shared_frame_time, control_failure
 
     ugv_serial = ultrasonic = cap = control_thread = imu_thread = None
-    window_name = "UGV - Autonomous Avoidance"
-    canny_window = "Canny - Raw (Left) | Lane ROI (Right)"
     
     try:
         ugv_serial = ugv_control.init_ugv(port=UGV_PORT, baudrate=SERIAL_BAUD)
@@ -628,8 +628,11 @@ def main():
         tracker = lane_detection.LaneTracker()
 
         if SHOW_WINDOWS:
-            cv2.namedWindow(window_name)
-            cv2.namedWindow(canny_window, cv2.WINDOW_NORMAL)
+            cv2.namedWindow(LANE_WINDOW, cv2.WINDOW_NORMAL)
+            cv2.namedWindow(CANNY_WINDOW, cv2.WINDOW_NORMAL)
+            print("[화면] 차선 인식과 Canny 표시. Q 또는 Esc로 종료.")
+        else:
+            print("[화면] SSH 또는 디스플레이 없는 환경: 화면 출력 끔.")
 
         control_thread = threading.Thread(target=control_thread_task, args=(ugv_serial,), daemon=True)
         control_thread.start()
@@ -668,11 +671,14 @@ def main():
                 report_time = now
 
             if SHOW_WINDOWS:
-                cv2.putText(result_image, f"STATE: {state.name}", (10, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
-                cv2.putText(result_image, f"Avoid: {avoid_direction.name}", (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 0), 1)
-                cv2.imshow(window_name, result_image)
-                cv2.imshow(canny_window, np.hstack((raw_edges, lane_edges)))
-                if cv2.waitKey(1) & 0xFF in (ord("q"), ord("Q"), 27): break
+                # 왼쪽: 전체 Canny / 오른쪽: 색상 필터와 ROI 적용 후 차선 검출용 에지
+                canny_view = np.hstack((raw_edges, lane_edges))
+                cv2.imshow(LANE_WINDOW, result_image)
+                cv2.imshow(CANNY_WINDOW, canny_view)
+
+                key = cv2.waitKey(1) & 0xFF
+                if key in (ord("q"), ord("Q"), 27):
+                    break
                     
         if control_failure: print(f"제어 오류: {control_failure}")
 
