@@ -1288,8 +1288,13 @@ def ugv_receive_thread_task():
 
                 else:
 
-                    # 다시 정상 자세가 되면 다음 전도 감지를 허용
-                    tipped_notified = False
+                     # 전도 상태였다가 정상 자세로 돌아온 순간
+                     if tipped_notified:
+                         send_hc12("TIPPED_CLEAR")
+                         print("[전도 해제] 정상 자세 복귀")
+                         print("[전도 해제] 앱으로 TIPPED_CLEAR 전송")
+
+                     tipped_notified = False
 
                 with state_lock:
 
