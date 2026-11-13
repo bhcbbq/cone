@@ -17,7 +17,7 @@ import json
 # IMU yaw unit MUST match the firmware output: "deg" or "rad".
 # Original program assumed degrees; retained as default (do not infer from a still image).
 IMU_YAW_UNIT = "rad"
-TURN_ANGLE_DEG = 25.0
+TURN_ANGLE_DEG = 30.0
 TURN_TOLERANCE_DEG = 2.0
 TURN_KP = 0.035
 TURN_MIN_SPEED = 0.18
@@ -487,8 +487,8 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
     # 5. 직진 통과 (정확히 40cm 이동)
     if state == State.AVOID_FORWARD:
         set_command(PASS_SPEED, 0.0)
-        # PASS_SPEED 속도로 40cm(0.4m)를 가는 데 걸리는 시간 계산
-        pass_time = 0.40 / PASS_SPEED
+        # PASS_SPEED 속도로 65cm(0.65m)를 가는 데 걸리는 시간 계산
+        pass_time = 0.65 / PASS_SPEED
         
         if state_elapsed() >= pass_time:
             force_stop()
