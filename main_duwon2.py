@@ -17,11 +17,11 @@ import json
 # IMU yaw unit MUST match the firmware output: "deg" or "rad".
 # Original program assumed degrees; retained as default (do not infer from a still image).
 IMU_YAW_UNIT = "rad"
-TURN_ANGLE_DEG = 25.0
+TURN_ANGLE_DEG = 30.0
 TURN_TOLERANCE_DEG = 2.0
 TURN_KP = 0.035
 TURN_MIN_SPEED = 0.18
-TURN_MAX_SPEED = 0.65   # command units assumed rad/s; verify ugv_control/firmware
+TURN_MAX_SPEED = 0.35   # command units assumed rad/s; verify ugv_control/firmware
 TURN_TIMEOUT_S = 6.0
 IMU_STALE_TIMEOUT_S = 0.35
 IMU_NO_MOTION_TIMEOUT_S = 1.5
@@ -559,8 +559,8 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
                 set_command(AVOID_SPEED, 0.0)
         else:
             set_command(AVOID_SPEED, 0.0)
-            # AVOID_SPEED 속도로 40cm(0.4m)를 가는 데 걸리는 시간 계산
-            extra_time = 0.40 / AVOID_SPEED 
+            # AVOID_SPEED 속도로 60cm(0.6m)를 가는 데 걸리는 시간 계산
+            extra_time = 0.60 / AVOID_SPEED 
             
             if time.monotonic() - run_fsm.clear_time >= extra_time:
                 force_stop()
