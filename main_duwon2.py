@@ -167,7 +167,6 @@ UGV_PORT = "/dev/ttyACM0"
 ULTRASONIC_PORT = "/dev/ttyUSB0"
 SERIAL_BAUD = 115200
 
-FRAME_WIDTH = 640
 FRAME_TIMEOUT = 0.5
 MAX_CAMERA_FAILURES = 3
 
@@ -253,28 +252,106 @@ def state_elapsed():
 # ============================================================
 # Vision & Pipeline Logic
 # ============================================================
-def gstreamer_pipeline(sensor_id=0, capture_width=1640, capture_height=1232, display_width=820, display_height=616, framerate=30, flip_method=0):
+def gstreamer_pipeline(
+    sensor_id=0,
+    capture_width=1280,
+    capture_height=720,
+    display_width=640,
+    display_height=360,
+    framerate=30,
+    flip_method=0,
+):
+
     return (
-        f"nvarguscamerasrc sensor-id={sensor_id} ! video/x-raw(memory:NVMM), width=(int){capture_width}, height=(int){capture_height}, format=(string)NV12, framerate=(fraction){framerate}/1 ! "
-        f"nvvidconv flip-method={flip_method} ! video/x-raw, width=(int){display_width}, height=(int){display_height}, format=(string)BGRx ! videoconvert ! video/x-raw, format=(string)BGR ! appsink drop=true max-buffers=1 sync=false"
+        "nvarguscamerasrc sensor-id=%d ! "
+        "video/x-raw(memory:NVMM), "
+        "width=(int)%d, "
+        "height=(int)%d, "
+        "framerate=(fraction)%d/1 ! "
+        "nvvidconv flip-method=%d ! "
+        "video/x-raw, "
+        "width=(int)%d, "
+        "height=(int)%d, "
+        "format=(string)BGRx ! "
+        "videoconvert ! "
+        "video/x-raw, "
+        "format=(string)BGR ! "
+        "appsink"
+        % (
+            sensor_id,
+            capture_width,
+            capture_height,
+            framerate,
+            flip_method,
+            display_width,
+            display_height,
+        )
     )
 
-def process_lane_frame(frame, tracker, now):
-    original_width = frame.shape[1]
-    target_height = max(2, round(frame.shape[0] * FRAME_WIDTH / original_width))
-    resized = cv2.resize(frame, (FRAME_WIDTH, target_height))
-    raw_edges, edges = lane_detection.lane_edges(resized)
-    pair, status = tracker.update(edges, now)
-    result_image, error, is_detected = lane_detection.draw_result(resized.copy(), pair, status)
+# main_final.py와 동일한 색상 필터 및 차선 ROI.
+def lane_edges(frame):
+    """전체 Canny 영상과 차선 검출용 에지를 반환합니다."""
+    height, width = frame.shape[:2]
 
-    # ver2의 x 좌표 두 점을 기존 회피 함수의 x(y_norm) 계수로 변환한다.
-    # ver2 기준 높이: 화면 위에서 76%, 94%. 회피 함수는 원본 영상의 x 좌표를 사용한다.
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    raw_edges = cv2.Canny(blurred, 50, 150)
+
+    hls = cv2.cvtColor(frame, cv2.COLOR_BGR2HLS)
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+    white = cv2.inRange(
+        hls,
+        (0, 150, 0),
+        (180, 255, 150),
+    )
+
+    yellow = cv2.inRange(
+        hsv,
+        (15, 65, 70),
+        (40, 255, 255),
+    )
+
+    colors = cv2.dilate(
+        white | yellow,
+        np.ones((5, 5), np.uint8),
+    )
+
+    edges = cv2.bitwise_and(raw_edges, colors)
+    mask = np.zeros_like(edges)
+
+    vertices = np.array(
+        [
+            [
+                (int(width * 0.05), int(height * 0.96)),
+                (int(width * 0.25), int(height * 0.40)),
+                (int(width * 0.75), int(height * 0.40)),
+                (int(width * 0.95), int(height * 0.96)),
+            ]
+        ],
+        dtype=np.int32,
+    )
+
+    cv2.fillPoly(mask, vertices, 255)
+    lane_edge_image = cv2.bitwise_and(edges, mask)
+
+    return raw_edges, lane_edge_image
+
+
+def process_lane_frame(frame, tracker, now):
+    # main_final과 같은 카메라 프레임을 리사이즈 없이 처리한다.
+    raw_edges, edges = lane_edges(frame)
+    pair, status = tracker.update(edges, now)
+    result_image, error, is_detected = lane_detection.draw_result(frame.copy(), pair, status)
+
+    # 회피 함수가 사용하는 x(y_norm) 형식으로만 변환한다.
+    # 원본 프레임에서 검출했으므로 가로 좌표를 다시 확대하지 않는다.
     avoidance_pair = None
     if pair is not None:
         y_top, y_bottom = 0.76, 0.94
         slope = (pair[:, 1] - pair[:, 0]) / (y_bottom - y_top)
         intercept = pair[:, 0] - slope * y_top
-        avoidance_pair = np.column_stack((slope, intercept)) * (original_width / resized.shape[1])
+        avoidance_pair = np.column_stack((slope, intercept))
     return error, result_image, is_detected, avoidance_pair, raw_edges, edges
 
 def get_obstacle_direction_by_contour(frame, pair):
