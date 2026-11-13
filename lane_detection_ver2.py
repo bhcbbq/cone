@@ -246,7 +246,7 @@ class LaneTracker:
             for right_score, right in right_candidates:
                 widths = right - left
 
-                if not width * 0.12 < widths[1] < width * 1.05:
+                if not width * 0.12 < widths[1] < width * 1.30:
                     continue
 
                 if not (
