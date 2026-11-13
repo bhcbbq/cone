@@ -262,10 +262,10 @@ def gstreamer_pipeline(sensor_id=0, capture_width=1640, capture_height=1232, dis
 def process_lane_frame(frame, tracker, now):
     target_height = max(2, round(frame.shape[0] * FRAME_WIDTH / frame.shape[1]))
     frame = cv2.resize(frame, (FRAME_WIDTH, target_height))
-    _, edges, top, bottom = lane_detection.get_edges(frame, return_raw=True)
+    raw_edges, edges, top, bottom = lane_detection.get_edges(frame, return_raw=True)
     pair, status, inferred = tracker.update(edges, top, bottom, now)
     result_image, error, is_detected = lane_detection.draw_result(frame.copy(), pair, status, inferred, top, bottom)
-    return error, result_image, is_detected, pair
+    return error, result_image, is_detected, pair, raw_edges, edges
 
 def get_obstacle_direction_by_contour(frame, pair):
     if pair is None or len(pair) < 2:
@@ -525,6 +525,7 @@ def main():
 
     ugv_serial = ultrasonic = cap = control_thread = imu_thread = None
     window_name = "UGV - Autonomous Avoidance"
+    canny_window = "Canny - Raw (Left) | Lane ROI (Right)"
     
     try:
         ugv_serial = ugv_control.init_ugv(port=UGV_PORT, baudrate=SERIAL_BAUD)
@@ -545,6 +546,7 @@ def main():
 
         if SHOW_WINDOWS:
             cv2.namedWindow(window_name)
+            cv2.namedWindow(canny_window, cv2.WINDOW_NORMAL)
 
         control_thread = threading.Thread(target=control_thread_task, args=(ugv_serial,), daemon=True)
         control_thread.start()
@@ -565,7 +567,9 @@ def main():
                 continue
 
             failure_count = 0
-            error, result_image, is_detected, pair = process_lane_frame(frame, tracker, frame_started)
+            error, result_image, is_detected, pair, raw_edges, lane_edges = process_lane_frame(
+                frame, tracker, frame_started
+            )
             left_d, front_d, right_d = read_distances(ultrasonic)
 
             with error_lock:
@@ -584,6 +588,7 @@ def main():
                 cv2.putText(result_image, f"STATE: {state.name}", (10, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
                 cv2.putText(result_image, f"Avoid: {avoid_direction.name}", (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 0), 1)
                 cv2.imshow(window_name, result_image)
+                cv2.imshow(canny_window, np.hstack((raw_edges, lane_edges)))
                 if cv2.waitKey(1) & 0xFF in (ord("q"), ord("Q"), 27): break
                     
         if control_failure: print(f"제어 오류: {control_failure}")
