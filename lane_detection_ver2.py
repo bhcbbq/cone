@@ -11,10 +11,10 @@ SMOOTH_ALPHA = 0.35
 COLOR_BONUS = 40.0
 
 # 화면 아래로 연장한 x좌표의 허용 범위: 화면 폭 기준 -50% ~ 150%.
-LANE_X_MIN_RATIO = -0.50
-LANE_X_MAX_RATIO = 1.50
+LANE_X_MIN_RATIO = -0.75
+LANE_X_MAX_RATIO = 1.75
 # 양쪽 차선 간격의 최대 허용값: 화면 폭의 200%.
-MAX_LANE_WIDTH_RATIO = 2.00
+MAX_LANE_WIDTH_RATIO = 2.50
 
 
 def lane_edges(frame):
