@@ -10,6 +10,12 @@ SMOOTH_ALPHA = 0.35
 # 한쪽 차선 후보가 받을 수 있는 최대 색상 가산점
 COLOR_BONUS = 40.0
 
+# 화면 아래로 연장한 x좌표의 허용 범위: 화면 폭 기준 -50% ~ 150%.
+LANE_X_MIN_RATIO = -0.50
+LANE_X_MAX_RATIO = 1.50
+# 양쪽 차선 간격의 최대 허용값: 화면 폭의 200%.
+MAX_LANE_WIDTH_RATIO = 2.00
+
 
 def lane_edges(frame):
     """전체 Canny 영상과 차선 검출용 에지를 반환합니다."""
@@ -75,7 +81,7 @@ class LaneTracker:
                 a * y_bottom + b,
             ])
 
-            if not -width * 0.15 < ends[1] < width * 1.15:
+            if not width * LANE_X_MIN_RATIO < ends[1] < width * LANE_X_MAX_RATIO:
                 continue
 
             if self.pair is None:
@@ -252,7 +258,7 @@ class LaneTracker:
             for right_score, right, right_bonus in right_candidates:
                 widths = right - left
 
-                if not width * 0.12 < widths[1] < width * 1.30:
+                if not width * 0.12 < widths[1] < width * MAX_LANE_WIDTH_RATIO:
                     continue
 
                 if not (
@@ -267,8 +273,8 @@ class LaneTracker:
                         continue
 
                 if not (
-                    -width * 0.15 < left.min()
-                    and right.max() < width * 1.15
+                    width * LANE_X_MIN_RATIO < left.min()
+                    and right.max() < width * LANE_X_MAX_RATIO
                 ):
                     continue
 
