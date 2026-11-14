@@ -92,7 +92,7 @@ def calculate_pid(
     current_error,
     previous_error,
     dt,
-    Kp=0.007,
+    Kp=0.008,
     Kd=0.002,
 ):
     """
