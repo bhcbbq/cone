@@ -390,9 +390,24 @@ def draw_result(frame, pair, status):
     )
 
     if pair is not None:
+        # 차선 좌표의 계산 기준 높이: 기존 값 유지
         y_top = height * 0.76
         y_bottom = height * 0.94
 
+        # 표시선의 위쪽 높이만 조절합니다.
+        # 0.40: 화면 위에서 40% 지점까지 표시
+        # 숫자를 줄이면 더 길게, 늘리면 더 짧게 표시됩니다.
+        draw_y_top = int(height * 0.40)
+
+        # 기존 기울기를 유지하며 위쪽 표시 좌표 계산
+        draw_tops = (
+            pair[:, 0]
+            + (pair[:, 1] - pair[:, 0])
+            * (draw_y_top - y_top)
+            / (y_bottom - y_top)
+        )
+
+        # 화면 맨 아래의 차선 좌표: 기존 계산 유지
         bottoms = (
             pair[:, 1]
             + (pair[:, 1] - pair[:, 0])
@@ -400,12 +415,13 @@ def draw_result(frame, pair, status):
             / (y_bottom - y_top)
         )
 
-        for side, (points, bottom) in enumerate(zip(pair, bottoms)):
+        for side, bottom in enumerate(bottoms):
             inferred = (
                 (status == "LEFT_ONLY" and side == 1)
                 or (status == "RIGHT_ONLY" and side == 0)
             )
 
+            # 실제 차선: 초록색 / 가상 차선: 주황색
             color = (
                 (0, 165, 255)
                 if inferred
@@ -417,25 +433,27 @@ def draw_result(frame, pair, status):
 
             cv2.line(
                 frame,
-                (int(points[0]), int(y_top)),
+                (int(draw_tops[side]), draw_y_top),
                 (int(bottom), height - 1),
                 color,
                 2,
                 cv2.LINE_AA,
             )
 
-        center_top = float(np.mean(pair[:, 0]))
+        draw_center_top = float(np.mean(draw_tops))
         center_bottom = float(np.mean(bottoms))
 
+        # 노란색 중앙선도 동일한 높이까지 연장
         cv2.line(
             frame,
-            (int(center_top), int(y_top)),
+            (int(draw_center_top), draw_y_top),
             (int(center_bottom), height - 1),
             (0, 255, 255),
             1,
             cv2.LINE_AA,
         )
 
+        # 조향 오차 계산: 기존 방식 그대로 유지
         error = camera_x - center_bottom
         marker_y = height - 30
 
