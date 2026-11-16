@@ -100,6 +100,7 @@ def set_lamp(on):
     except Exception as e:
         print("[LAMP 오류]", e)
 
+
 # ============================================================
 # ENCODER STATE
 # ============================================================
@@ -606,7 +607,7 @@ def hc12_thread_task():
 
                             stop_pending = False
 
-                        set_lamp(False)                 # [램프] 복귀 시작 → 끄기
+                        set_lamp(False)  # [램프] 복귀 시작 → 끄기
 
                         send_hc12("RETURNING")
 
@@ -857,13 +858,13 @@ def ugv_receive_thread_task():
 
                 else:
 
-                     # 전도 상태였다가 정상 자세로 돌아온 순간
-                     if tipped_notified:
-                         send_hc12("TIPPED_CLEAR")
-                         print("[전도 해제] 정상 자세 복귀")
-                         print("[전도 해제] 앱으로 TIPPED_CLEAR 전송")
+                    # 전도 상태였다가 정상 자세로 돌아온 순간
+                    if tipped_notified:
+                        send_hc12("TIPPED_CLEAR")
+                        print("[전도 해제] 정상 자세 복귀")
+                        print("[전도 해제] 앱으로 TIPPED_CLEAR 전송")
 
-                     tipped_notified = False
+                    tipped_notified = False
 
                 with state_lock:
 
@@ -1005,7 +1006,7 @@ def ugv_receive_thread_task():
                             right_m = abs(odr - return_drive_start_odr) / 100.0
 
                             returned_m = (left_m + right_m) / 2.0
-                            
+
                             # 복귀 진행거리 앱으로 전송
                             send_hc12(f"DISTANCE:{returned_m:.2f}")
 
@@ -1024,10 +1025,24 @@ def ugv_receive_thread_task():
 
                                 send_hc12("RETURNED")
 
-                                paused_mission = False
-                                paused_return_mode = None
+                                # 다음 미션을 위해 완전히 초기화
+                                start_odl = None
+                                start_odr = None
 
-                                print("[RETURN] 복귀 완료")
+                                stop_pending = False
+                                paused_mission = False
+
+                                mission_outbound_total = 0.0
+                                return_drive_distance = 0.0
+                                target_distance_m = None
+
+                                return_drive_start_odl = None
+                                return_drive_start_odr = None
+
+                                paused_return_mode = None
+                                align_stable_count = 0
+
+                                print("[RETURN] 복귀 완료 - 다음 주행 준비 완료")
 
             # ========================================================
             # T2102 목표거리 도착
@@ -1051,7 +1066,7 @@ def ugv_receive_thread_task():
                     print("[T2102] Jetson에서 이미 목표거리 도착 처리 완료")
                     continue
 
-                set_lamp(True)                          # [램프] 도착 → 켜기
+                set_lamp(True)  # [램프] 도착 → 켜기
 
                 try:
                     data = json.loads(line)
@@ -1312,7 +1327,9 @@ def gstreamer_pipeline(
 
 if __name__ == "__main__":
 
-    show_windows = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")) and not any(
+    show_windows = bool(
+        os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+    ) and not any(
         os.environ.get(name) for name in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY")
     )
 
