@@ -180,7 +180,7 @@ PASS_SPEED = 0.40             # m/s (대각선 및 직진 통과)
 
 # 거리 기반 회피 조건 파라미터
 FRONT_STOP_CM = 70.0         # 회피 시작 기준 거리 (전방 장애물 인식)
-SIDE_DANGER_CM = 28.0         # 측면 28cm 미만일 경우 너무 가까워 임시 정지
+
 SIDE_CLEAR_CM = 80.0          # 측면 80cm 이상 멀어지면 장애물을 통과했다고 판단
 
 ALIGN_TIME_S = 1.6
@@ -504,10 +504,7 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
             run_fsm.clear_time = None
 
         if run_fsm.clear_time is None:
-            if 0.0 < side_d < SIDE_DANGER_CM:
-                force_stop()
-                print(f"[위험] 측면 장애물 초근접! ({side_d:.1f}cm) -> 충돌 방지 대기", flush=True)
-            elif side_d >= SIDE_CLEAR_CM or side_d < 0:
+            if side_d >= SIDE_CLEAR_CM or side_d < 0:
                 run_fsm.clear_time = time.monotonic()
                 print("[통과] 측면 클리어 -> 추가 60cm 마진 전진 시작", flush=True)
             else:
