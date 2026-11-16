@@ -40,6 +40,56 @@ def lane_edges(frame):
     return raw_edges, lane_edge_image
 
 
+def _tape_center_segment(x1, y1, x2, y2, tape_mask):
+    """경계 근처의 제한된 색상 띠를 찾아 테이프 중심 선분으로 변환합니다.
+
+    두 Canny 경계가 모두 검출될 필요는 없습니다. 색상 띠의 양 끝이
+    확인되지 않거나 너무 넓으면 원래 선분을 그대로 사용합니다.
+    """
+    original = (float(x1), float(y1), float(x2), float(y2))
+    if tape_mask is None or abs(y2 - y1) < 6:
+        return original
+    height, width = tape_mask.shape
+    max_tape_width = max(6, int(width * 0.10))
+    samples = []
+    for y in np.unique(np.rint(np.linspace(y1, y2, 16)).astype(int)):
+        if not 0 <= y < height:
+            continue
+        x = int(round(x1 + (x2 - x1) * (y - y1) / (y2 - y1)))
+        if not 0 <= x < width:
+            continue
+        row = tape_mask[y]
+        lo, hi = max(0, x - 3), min(width, x + 4)
+        hits = np.flatnonzero(row[lo:hi]) + lo
+        if not len(hits):
+            continue
+        seed = int(hits[np.argmin(np.abs(hits - x))])
+        left = right = seed
+        while left > 0 and row[left - 1] and seed - left <= max_tape_width:
+            left -= 1
+        while right < width - 1 and row[right + 1] and right - seed <= max_tape_width:
+            right += 1
+        tape_width = right - left + 1
+        if left == 0 or right == width - 1:
+            continue
+        if not 2 <= tape_width <= max_tape_width:
+            continue
+        # 색상 영역 내부의 바닥 이음새 등을 중심선으로 바꾸지 않습니다.
+        if min(abs(x - left), abs(x - right)) > 4:
+            continue
+        samples.append((float(y), (left + right) * 0.5))
+    if len(samples) < 8:
+        return original
+    samples = np.asarray(samples)
+    if np.ptp(samples[:, 0]) < abs(y2 - y1) * 0.5:
+        return original
+    a, b = np.polyfit(samples[:, 0], samples[:, 1], 1)
+    residual = np.abs(samples[:, 1] - (a * samples[:, 0] + b))
+    if np.max(residual) > 3.0:
+        return original
+    return (a * y1 + b, float(y1), a * y2 + b, float(y2))
+
+
 class LaneTracker:
     def __init__(self):
         self.shape = None
@@ -51,7 +101,7 @@ class LaneTracker:
         self.lane_width = None
         self.width_count = 0
 
-    def candidates(self, lines, height, width, color_mask=None):
+    def candidates(self, lines, height, width, color_mask=None, tape_mask=None):
         """허프 선분들을 묶어서 좌우 차선 후보를 만듭니다."""
         groups = [[], []]
 
@@ -63,6 +113,9 @@ class LaneTracker:
         segments = []
 
         for x1, y1, x2, y2 in np.asarray(lines).reshape(-1, 4):
+            x1, y1, x2, y2 = _tape_center_segment(
+                x1, y1, x2, y2, tape_mask
+            )
             dx = float(x2 - x1)
             dy = float(y2 - y1)
 
@@ -236,6 +289,7 @@ class LaneTracker:
         )
 
         color_mask = None
+        tape_mask = None
         if frame is not None:
             if frame.shape[:2] != edges.shape:
                 raise ValueError("frame과 edges의 해상도가 같아야 합니다.")
@@ -243,13 +297,16 @@ class LaneTracker:
             hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
             white = cv2.inRange(hls, (0, 150, 0), (180, 255, 150))
             yellow = cv2.inRange(hsv, (15, 65, 70), (40, 255, 255))
-            color_mask = cv2.dilate(white | yellow, np.ones((5, 5), np.uint8))
+            # 중심 계산에는 팽창시키지 않은 원래 색상 영역을 사용합니다.
+            tape_mask = white | yellow
+            color_mask = cv2.dilate(tape_mask, np.ones((5, 5), np.uint8))
 
         left_candidates, right_candidates = self.candidates(
             lines,
             height,
             width,
             color_mask,
+            tape_mask,
         )
 
         choices = []
