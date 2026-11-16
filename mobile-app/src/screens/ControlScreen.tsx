@@ -1488,8 +1488,8 @@ const styles = StyleSheet.create({
 
   sliderFullTrack: {
     position: 'absolute',
-    left: 8,
-    right: 8,
+    left: 14,
+    right: 14,
     height: 4,
     borderRadius: 2,
     backgroundColor: '#CBD3DE',
