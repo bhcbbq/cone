@@ -25,6 +25,7 @@ TURN_TOLERANCE_DEG = 2.0
 TURN_SPEED = 0.35           # 기본 회전 속도
 TURN_SLOW_SPEED = 0.20      # 전압 강하 방지 및 정밀도를 위해 목표 각도 근처에서 사용할 감속 속도
 TURN_SLOW_REMAIN_DEG = 12.0 # 남은 각도가 12도 이하일 때 감속 시작 (35도 회전 기준)
+TURN_FORWARD_SPEED = 0.12
 
 TURN_TIMEOUT_S = 6.0
 IMU_STALE_TIMEOUT_S = 0.35
@@ -161,7 +162,7 @@ def run_imu_turn(command_direction, next_state):
     else:
         angular = TURN_SPEED
         
-    set_command(0.0, command_direction * angular)
+    set_command(TURN_FORWARD_SPEED, command_direction * angular)
 
 # ============================================================
 # Configuration
