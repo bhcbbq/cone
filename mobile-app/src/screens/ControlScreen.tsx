@@ -833,6 +833,7 @@ export function RobotControlScreen({
                       }
                       maximumTrackTintColor="transparent"
                       thumbImage={sliderThumb}
+                      thumbSize={20}
                     />
                   </View>
 
@@ -1347,9 +1348,9 @@ const styles = StyleSheet.create({
     paddingRight: spacing.sm,
     marginTop: -6,
 
-    
-      rowGap: 3,
-    
+
+    rowGap: 3,
+
   },
 
   statusBadge: {
