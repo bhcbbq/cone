@@ -921,7 +921,7 @@ export default function HomeScreen() {
 
 
 
-  const handleEsp32Message = (
+  const handleSingleEsp32Message = (
 
 
 
@@ -1524,6 +1524,24 @@ export default function HomeScreen() {
 
 
 
+  };
+
+  const handleEsp32Message = (
+    rawMessage: string
+  ) => {
+
+    const messages = rawMessage
+      .split(/\r?\n/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+    if (messages.length === 0) {
+      return;
+    }
+
+    messages.forEach((message) => {
+      handleSingleEsp32Message(message);
+    });
   };
 
 
