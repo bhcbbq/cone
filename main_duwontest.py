@@ -18,7 +18,7 @@ import json
 # IMU yaw unit MUST match the firmware output: "deg" or "rad".
 # Original program assumed degrees; retained as default (do not infer from a still image).
 IMU_YAW_UNIT = "rad"
-TURN_ANGLE_DEG = 35.0
+TURN_ANGLE_DEG = 25.0
 TURN_TOLERANCE_DEG = 2.0
 TURN_KP = 0.045
 TURN_MIN_SPEED = 0.45
@@ -505,7 +505,7 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
                 set_command(AVOID_SPEED, 0.0)
         else:
             set_command(AVOID_SPEED, 0.0)
-            extra_time = 0.60 / AVOID_SPEED 
+            extra_time = 0.50 / AVOID_SPEED 
             
             if time.monotonic() - run_fsm.clear_time >= extra_time:
                 force_stop()
