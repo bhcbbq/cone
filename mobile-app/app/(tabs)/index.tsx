@@ -921,7 +921,7 @@ export default function HomeScreen() {
 
 
 
-  const handleEsp32Message = (
+  const handleSingleEsp32Message = (
 
 
 
@@ -1524,6 +1524,24 @@ export default function HomeScreen() {
 
 
 
+  };
+
+  const handleEsp32Message = (
+    rawMessage: string
+  ) => {
+
+    const messages = rawMessage
+      .split(/\r?\n/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+    if (messages.length === 0) {
+      return;
+    }
+
+    messages.forEach((message) => {
+      handleSingleEsp32Message(message);
+    });
   };
 
 
@@ -3186,29 +3204,14 @@ export default function HomeScreen() {
 
       return;
 
-
-
-    }
-
-
-
-
+      // 새 복귀 시작이면 진행률을 0부터 시작
+      if (command === 'RETURN') {
+        segmentOffsetRef.current = 0;
+        updateCurrentDistance(0);
 
 
 
-    returnPausedRef.current = false;
-
-
-
-    // Jetson의 RETURNING Notify로도 바뀌지만
-
-
-
-    // 버튼 반응을 바로 보여주기 위해 먼저 변경
-
-
-
-    setRobotStatus('returning');
+      }
 
 
 
@@ -3216,27 +3219,19 @@ export default function HomeScreen() {
 
 
 
-    console.log(command);
+      returnPausedRef.current = false;
 
 
 
-  };
+      // Jetson의 RETURNING Notify로도 바뀌지만
 
 
 
+      // 버튼 반응을 바로 보여주기 위해 먼저 변경
 
 
 
-
-  // =========================
-
-
-
-  // RESET
-
-
-
-  // =========================
+      setRobotStatus('returning');
 
 
 
@@ -3244,23 +3239,111 @@ export default function HomeScreen() {
 
 
 
-  const resetDistance = async () => {
+      console.log(command);
 
 
 
-    // 외부 ESP32 코드와 명령 문자열 일치
+    };
 
 
 
-    const resetSent =
 
 
 
-      await sendCommand(
+
+    // =========================
 
 
 
-        'RESET_DISTANCE'
+    // RESET
+
+
+
+    // =========================
+
+
+
+
+
+
+
+    const resetDistance = async () => {
+
+
+
+      // 외부 ESP32 코드와 명령 문자열 일치
+
+
+
+      const resetSent =
+
+
+
+        await sendCommand(
+
+
+
+          'RESET_DISTANCE'
+
+
+
+        );
+
+
+
+
+
+
+
+      if (!resetSent) {
+
+
+
+        return;
+
+
+
+      }
+
+
+
+
+
+
+
+      segmentOffsetRef.current = 0;
+
+
+
+      returnPausedRef.current = false;
+
+
+
+      updateCurrentDistance(0);
+
+
+
+
+
+
+
+      setRobotStatus('idle');
+
+
+
+
+
+
+
+      // 현재 입력창의 목표거리로 새 주행 준비
+
+
+
+      updateActiveTargetDistance(
+
+
+
+        targetDistance
 
 
 
@@ -3272,15 +3355,11 @@ export default function HomeScreen() {
 
 
 
-    if (!resetSent) {
+      console.log('RESET');
 
 
 
-      return;
-
-
-
-    }
+    };
 
 
 
@@ -3288,23 +3367,15 @@ export default function HomeScreen() {
 
 
 
-    segmentOffsetRef.current = 0;
+    // =========================
 
 
 
-    returnPausedRef.current = false;
+    // 화면
 
 
 
-    updateCurrentDistance(0);
-
-
-
-
-
-
-
-    setRobotStatus('idle');
+    // =========================
 
 
 
@@ -3312,15 +3383,300 @@ export default function HomeScreen() {
 
 
 
-    // 현재 입력창의 목표거리로 새 주행 준비
+    return (
 
 
 
-    updateActiveTargetDistance(
+      <RobotControlScreen
 
 
 
-      targetDistance
+        connectionStatus={
+
+
+
+          connectionStatus
+
+
+
+        }
+
+
+
+
+
+
+
+        hc12Status={hc12Status}
+
+
+
+
+
+
+
+        robotStatus={
+
+
+
+          robotStatus
+
+
+
+        }
+
+
+
+
+
+
+
+        // 입력창용 목표거리
+
+
+
+        targetDistance={
+
+
+
+          targetDistance
+
+
+
+        }
+
+
+
+
+
+
+
+        // 진행률 카드용 전체 목표거리
+
+
+
+        activeTargetDistance={
+
+
+
+          activeTargetDistance
+
+
+
+        }
+
+
+
+
+
+
+
+        // 실제 엔코더 기반 현재거리
+
+
+
+        currentDistance={
+
+
+
+          currentDistance
+
+
+
+        }
+
+
+
+
+
+
+
+        deviceName={
+
+
+
+          TEST_MODE
+
+
+
+            ? `${BLE_DEVICE_NAME} (TEST)`
+
+
+
+            : device?.name ??
+
+
+
+            BLE_DEVICE_NAME
+
+
+
+        }
+
+
+
+
+
+
+
+        warnings={{}}
+
+
+
+
+
+
+
+        onConnect={
+
+
+
+          connectESP32
+
+
+
+        }
+
+
+
+
+
+
+
+        onDisconnect={
+
+
+
+          disconnectESP32
+
+
+
+        }
+
+
+
+
+
+
+
+        onTargetDistanceChange={
+
+
+
+          changeTargetDistance
+
+
+
+        }
+
+
+
+
+
+
+
+        onStart={
+
+
+
+          startDriving
+
+
+
+        }
+
+
+
+
+
+
+
+        onStop={
+
+
+
+          stopDriving
+
+
+
+        }
+
+
+
+
+
+
+
+        onReturn={
+
+
+
+          returnDriving
+
+
+
+        }
+
+
+
+
+
+
+
+        onResetDistance={
+
+
+
+          resetDistance
+
+
+
+        }
+
+
+        speed={
+          driveSpeed
+        }
+
+
+        onSpeedChange={
+          changeDriveSpeed
+        }
+
+
+        onSpeedChangeComplete={
+          applyDriveSpeed
+        }
+
+
+        batteryVoltage={
+          batteryVoltage
+        }
+
+
+        batteryPercent={
+          batteryPercent
+        }
+
+
+        onManualPress={
+          manualPress
+        }
+
+
+        onManualRelease={
+          manualRelease
+        }
+
+
+
+
+
+        tippedVisible={
+          tippedVisible
+        }
+
+      />
 
 
 
@@ -3328,340 +3684,7 @@ export default function HomeScreen() {
 
 
 
-
-
-
-
-    console.log('RESET');
-
-
-
-  };
-
-
-
-
-
-
-
-  // =========================
-
-
-
-  // 화면
-
-
-
-  // =========================
-
-
-
-
-
-
-
-  return (
-
-
-
-    <RobotControlScreen
-
-
-
-      connectionStatus={
-
-
-
-        connectionStatus
-
-
-
-      }
-
-
-
-
-
-
-
-      hc12Status={hc12Status}
-
-
-
-
-
-
-
-      robotStatus={
-
-
-
-        robotStatus
-
-
-
-      }
-
-
-
-
-
-
-
-      // 입력창용 목표거리
-
-
-
-      targetDistance={
-
-
-
-        targetDistance
-
-
-
-      }
-
-
-
-
-
-
-
-      // 진행률 카드용 전체 목표거리
-
-
-
-      activeTargetDistance={
-
-
-
-        activeTargetDistance
-
-
-
-      }
-
-
-
-
-
-
-
-      // 실제 엔코더 기반 현재거리
-
-
-
-      currentDistance={
-
-
-
-        currentDistance
-
-
-
-      }
-
-
-
-
-
-
-
-      deviceName={
-
-
-
-        TEST_MODE
-
-
-
-          ? `${BLE_DEVICE_NAME} (TEST)`
-
-
-
-          : device?.name ??
-
-
-
-          BLE_DEVICE_NAME
-
-
-
-      }
-
-
-
-
-
-
-
-      warnings={{}}
-
-
-
-
-
-
-
-      onConnect={
-
-
-
-        connectESP32
-
-
-
-      }
-
-
-
-
-
-
-
-      onDisconnect={
-
-
-
-        disconnectESP32
-
-
-
-      }
-
-
-
-
-
-
-
-      onTargetDistanceChange={
-
-
-
-        changeTargetDistance
-
-
-
-      }
-
-
-
-
-
-
-
-      onStart={
-
-
-
-        startDriving
-
-
-
-      }
-
-
-
-
-
-
-
-      onStop={
-
-
-
-        stopDriving
-
-
-
-      }
-
-
-
-
-
-
-
-      onReturn={
-
-
-
-        returnDriving
-
-
-
-      }
-
-
-
-
-
-
-
-      onResetDistance={
-
-
-
-        resetDistance
-
-
-
-      }
-
-
-      speed={
-        driveSpeed
-      }
-
-
-      onSpeedChange={
-        changeDriveSpeed
-      }
-
-
-      onSpeedChangeComplete={
-        applyDriveSpeed
-      }
-
-
-      batteryVoltage={
-        batteryVoltage
-      }
-
-
-      batteryPercent={
-        batteryPercent
-      }
-
-
-      onManualPress={
-        manualPress
-      }
-
-
-      onManualRelease={
-        manualRelease
-      }
-
-
-
-
-
-      tippedVisible={
-        tippedVisible
-      }
-
-    />
-
-
-
-  );
-
-
-
-}
+  }
 
 
 

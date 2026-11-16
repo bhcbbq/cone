@@ -48,7 +48,7 @@ def main():
                 return 1
 
             raw_edges, lane_edges = lane_detection.lane_edges(frame)
-            pair, status = tracker.update(lane_edges, time.monotonic())
+            pair, status = tracker.update(lane_edges, time.monotonic(), frame=frame)
             result, _, _ = lane_detection.draw_result(frame, pair, status)
 
             cv2.imshow(LANE_WINDOW, result)

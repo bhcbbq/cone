@@ -7,6 +7,15 @@ HOLD_SECONDS = 0.20
 WIDTH_LEARN_FRAMES = 3
 SMOOTH_ALPHA = 0.35
 
+# 한쪽 차선 후보가 받을 수 있는 최대 색상 가산점
+COLOR_BONUS = 40.0
+
+# 화면 아래로 연장한 x좌표의 허용 범위: 화면 폭 기준 -50% ~ 150%.
+LANE_X_MIN_RATIO = -0.50
+LANE_X_MAX_RATIO = 1.50
+# 양쪽 차선 간격의 최대 허용값: 화면 폭의 200%.
+MAX_LANE_WIDTH_RATIO = 2.00
+
 
 def lane_edges(frame):
     """전체 Canny 영상과 차선 검출용 에지를 반환합니다."""
@@ -16,38 +25,17 @@ def lane_edges(frame):
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     raw_edges = cv2.Canny(blurred, 50, 150)
 
-    hls = cv2.cvtColor(frame, cv2.COLOR_BGR2HLS)
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-
-    white = cv2.inRange(
-        hls,
-        (0, 150, 0),
-        (180, 255, 150),
-    )
-
-    yellow = cv2.inRange(
-        hsv,
-        (15, 65, 70),
-        (40, 255, 255),
-    )
-
-    colors = cv2.dilate(
-        white | yellow,
-        np.ones((5, 5), np.uint8),
-    )
-
-    edges = cv2.bitwise_and(raw_edges, colors)
-    mask = np.zeros_like(edges)
+    mask = np.zeros_like(raw_edges)
 
     vertices = np.array([[
-        (int(width * 0.05), int(height * 0.96)),
-        (int(width * 0.25), int(height * 0.40)),
-        (int(width * 0.75), int(height * 0.40)),
-        (int(width * 0.95), int(height * 0.96)),
+        (int(width * 0.01), int(height * 0.99)),  # 왼쪽 아래
+        (int(width * 0.01), int(height * 0.20)),  # 왼쪽 위
+        (int(width * 0.99), int(height * 0.20)),  # 오른쪽 위
+        (int(width * 0.99), int(height * 0.99)),  # 오른쪽 아래
     ]], dtype=np.int32)
 
     cv2.fillPoly(mask, vertices, 255)
-    lane_edge_image = cv2.bitwise_and(edges, mask)
+    lane_edge_image = cv2.bitwise_and(raw_edges, mask)
 
     return raw_edges, lane_edge_image
 
@@ -63,7 +51,7 @@ class LaneTracker:
         self.lane_width = None
         self.width_count = 0
 
-    def candidates(self, lines, height, width):
+    def candidates(self, lines, height, width, color_mask=None):
         """허프 선분들을 묶어서 좌우 차선 후보를 만듭니다."""
         groups = [[], []]
 
@@ -93,7 +81,7 @@ class LaneTracker:
                 a * y_bottom + b,
             ])
 
-            if not -width * 0.15 < ends[1] < width * 1.15:
+            if not width * LANE_X_MIN_RATIO < ends[1] < width * LANE_X_MAX_RATIO:
                 continue
 
             if self.pair is None:
@@ -115,11 +103,19 @@ class LaneTracker:
 
             length = min(np.hypot(dx, dy), 80)
 
+            # 에지를 삭제하지 않고, 선분 주변의 흰색/노란색 비율만 측정합니다.
+            color_ratio = 0.0
+            if color_mask is not None:
+                xs = np.clip(np.rint(np.linspace(x1, x2, 24)).astype(int), 0, width - 1)
+                ys = np.clip(np.rint(np.linspace(y1, y2, 24)).astype(int), 0, height - 1)
+                color_ratio = float(np.mean(color_mask[ys, xs] > 0))
+
             segments.append((
                 side,
                 ends,
                 [(x1, y1), (x2, y2)],
                 length,
+                color_ratio,
             ))
 
         for side in (0, 1):
@@ -172,6 +168,11 @@ class LaneTracker:
                     for segment in support
                 )
 
+                total_length = sum(segment[3] for segment in support)
+                color_bonus = COLOR_BONUS * sum(
+                    segment[3] * segment[4] for segment in support
+                ) / max(total_length, 1.0)
+
                 if self.pair is not None:
                     delta = np.max(
                         np.abs(ends - self.pair[side])
@@ -188,10 +189,10 @@ class LaneTracker:
                 )
 
                 if not duplicate:
-                    groups[side].append((score, ends))
+                    groups[side].append((score, ends, color_bonus))
 
             groups[side].sort(
-                key=lambda item: item[0],
+                key=lambda item: item[0] + item[2],
                 reverse=True,
             )
 
@@ -211,7 +212,7 @@ class LaneTracker:
 
         self.last_seen = now
 
-    def update(self, edges, now):
+    def update(self, edges, now, frame=None):
         height, width = edges.shape
 
         if self.shape != edges.shape:
@@ -234,19 +235,30 @@ class LaneTracker:
             maxLineGap=20,
         )
 
+        color_mask = None
+        if frame is not None:
+            if frame.shape[:2] != edges.shape:
+                raise ValueError("frame과 edges의 해상도가 같아야 합니다.")
+            hls = cv2.cvtColor(frame, cv2.COLOR_BGR2HLS)
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            white = cv2.inRange(hls, (0, 150, 0), (180, 255, 150))
+            yellow = cv2.inRange(hsv, (15, 65, 70), (40, 255, 255))
+            color_mask = cv2.dilate(white | yellow, np.ones((5, 5), np.uint8))
+
         left_candidates, right_candidates = self.candidates(
             lines,
             height,
             width,
+            color_mask,
         )
 
         choices = []
 
-        for left_score, left in left_candidates:
-            for right_score, right in right_candidates:
+        for left_score, left, left_bonus in left_candidates:
+            for right_score, right, right_bonus in right_candidates:
                 widths = right - left
 
-                if not width * 0.12 < widths[1] < width * 1.30:
+                if not width * 0.12 < widths[1] < width * MAX_LANE_WIDTH_RATIO:
                     continue
 
                 if not (
@@ -261,14 +273,15 @@ class LaneTracker:
                         continue
 
                 if not (
-                    -width * 0.15 < left.min()
-                    and right.max() < width * 1.15
+                    width * LANE_X_MIN_RATIO < left.min()
+                    and right.max() < width * LANE_X_MAX_RATIO
                 ):
                     continue
 
                 score = (
                     min(left_score, 100)
                     + min(right_score, 100)
+                    + left_bonus + right_bonus
                 )
 
                 choices.append((
@@ -377,9 +390,24 @@ def draw_result(frame, pair, status):
     )
 
     if pair is not None:
+        # 차선 좌표의 계산 기준 높이: 기존 값 유지
         y_top = height * 0.76
         y_bottom = height * 0.94
 
+        # 표시선의 위쪽 높이만 조절합니다.
+        # 0.40: 화면 위에서 40% 지점까지 표시
+        # 숫자를 줄이면 더 길게, 늘리면 더 짧게 표시됩니다.
+        draw_y_top = int(height * 0.40)
+
+        # 기존 기울기를 유지하며 위쪽 표시 좌표 계산
+        draw_tops = (
+            pair[:, 0]
+            + (pair[:, 1] - pair[:, 0])
+            * (draw_y_top - y_top)
+            / (y_bottom - y_top)
+        )
+
+        # 화면 맨 아래의 차선 좌표: 기존 계산 유지
         bottoms = (
             pair[:, 1]
             + (pair[:, 1] - pair[:, 0])
@@ -387,12 +415,13 @@ def draw_result(frame, pair, status):
             / (y_bottom - y_top)
         )
 
-        for side, (points, bottom) in enumerate(zip(pair, bottoms)):
+        for side, bottom in enumerate(bottoms):
             inferred = (
                 (status == "LEFT_ONLY" and side == 1)
                 or (status == "RIGHT_ONLY" and side == 0)
             )
 
+            # 실제 차선: 초록색 / 가상 차선: 주황색
             color = (
                 (0, 165, 255)
                 if inferred
@@ -404,25 +433,27 @@ def draw_result(frame, pair, status):
 
             cv2.line(
                 frame,
-                (int(points[0]), int(y_top)),
+                (int(draw_tops[side]), draw_y_top),
                 (int(bottom), height - 1),
                 color,
                 2,
                 cv2.LINE_AA,
             )
 
-        center_top = float(np.mean(pair[:, 0]))
+        draw_center_top = float(np.mean(draw_tops))
         center_bottom = float(np.mean(bottoms))
 
+        # 노란색 중앙선도 동일한 높이까지 연장
         cv2.line(
             frame,
-            (int(center_top), int(y_top)),
+            (int(draw_center_top), draw_y_top),
             (int(center_bottom), height - 1),
             (0, 255, 255),
             1,
             cv2.LINE_AA,
         )
 
+        # 조향 오차 계산: 기존 방식 그대로 유지
         error = camera_x - center_bottom
         marker_y = height - 30
 
