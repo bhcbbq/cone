@@ -20,9 +20,9 @@ import json
 IMU_YAW_UNIT = "rad"
 TURN_ANGLE_DEG = 35.0
 TURN_TOLERANCE_DEG = 2.0
-TURN_KP = 0.035
-TURN_MIN_SPEED = 0.3
-TURN_MAX_SPEED = 0.5   # command units assumed rad/s; verify ugv_control/firmware
+TURN_KP = 0.045
+TURN_MIN_SPEED = 0.45
+TURN_MAX_SPEED = 0.55   # command units assumed rad/s; verify ugv_control/firmware
 TURN_TIMEOUT_S = 6.0
 IMU_STALE_TIMEOUT_S = 0.35
 IMU_NO_MOTION_TIMEOUT_S = 3
