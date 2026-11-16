@@ -1345,6 +1345,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     flexWrap: 'wrap',
     paddingRight: spacing.sm,
+    marginTop: -6,
+
+    
+      rowGap: 3,
+    
   },
 
   statusBadge: {
