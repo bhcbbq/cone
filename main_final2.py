@@ -53,8 +53,6 @@ HC12_PORT = "/dev/ttyTHS1"
 HC12_BAUD = 115200
 
 
-
-
 # ============================================================
 # SHARED STATE
 # ============================================================
@@ -837,13 +835,13 @@ def ugv_receive_thread_task():
 
                 else:
 
-                     # 전도 상태였다가 정상 자세로 돌아온 순간
-                     if tipped_notified:
-                         send_hc12("TIPPED_CLEAR")
-                         print("[전도 해제] 정상 자세 복귀")
-                         print("[전도 해제] 앱으로 TIPPED_CLEAR 전송")
+                    # 전도 상태였다가 정상 자세로 돌아온 순간
+                    if tipped_notified:
+                        send_hc12("TIPPED_CLEAR")
+                        print("[전도 해제] 정상 자세 복귀")
+                        print("[전도 해제] 앱으로 TIPPED_CLEAR 전송")
 
-                     tipped_notified = False
+                    tipped_notified = False
 
                 with state_lock:
 
@@ -984,6 +982,9 @@ def ugv_receive_thread_task():
                             right_m = abs(odr - return_drive_start_odr) / 100.0
 
                             returned_m = (left_m + right_m) / 2.0
+
+                            # 복귀 진행거리 앱으로 전송
+                            send_hc12(f"DISTANCE:{returned_m:.2f}")
 
                             print(
                                 "[RETURN 거리]",
@@ -1287,7 +1288,9 @@ def gstreamer_pipeline(
 
 if __name__ == "__main__":
 
-    show_windows = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")) and not any(
+    show_windows = bool(
+        os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+    ) and not any(
         os.environ.get(name) for name in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY")
     )
 
