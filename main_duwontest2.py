@@ -22,8 +22,8 @@ TURN_ANGLE_DEG = 35.0
 TURN_TOLERANCE_DEG = 2.0
 
 # 비례 제어(KP) 대신 고정 속도 방식 적용
-TURN_SPEED = 0.35           # 기본 회전 속도
-TURN_SLOW_SPEED = 0.20      # 전압 강하 방지 및 정밀도를 위해 목표 각도 근처에서 사용할 감속 속도
+TURN_SPEED = 0.5           # 기본 회전 속도
+TURN_SLOW_SPEED = 0.30      # 전압 강하 방지 및 정밀도를 위해 목표 각도 근처에서 사용할 감속 속도
 TURN_SLOW_REMAIN_DEG = 12.0 # 남은 각도가 12도 이하일 때 감속 시작 (35도 회전 기준)
 TURN_FORWARD_SPEED = 0.12
 
