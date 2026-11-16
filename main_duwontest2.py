@@ -1,4 +1,4 @@
-# main_highway_contour_avoid_final_hybrid_optimized.py (수정본 - 회전 속도 고정 적용)
+# main_highway_contour_avoid_final_hybrid_optimized.py (수정본 - 전진하면 서 회전)
 import cv2
 import time
 import threading

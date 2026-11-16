@@ -500,7 +500,7 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
                 print(f"[위험] 측면 장애물 초근접! ({side_d:.1f}cm) -> 충돌 방지 대기", flush=True)
             elif side_d >= SIDE_CLEAR_CM or side_d < 0:
                 run_fsm.clear_time = time.monotonic()
-                print("[통과] 측면 클리어 -> 추가 60cm 마진 전진 시작", flush=True)
+                print("[통과] 측면 클리어 -> 추가 50cm 마진 전진 시작", flush=True)
             else:
                 set_command(AVOID_SPEED, 0.0)
         else:
