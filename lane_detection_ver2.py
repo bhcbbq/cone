@@ -7,6 +7,18 @@ HOLD_SECONDS = 0.20
 WIDTH_LEARN_FRAMES = 3
 SMOOTH_ALPHA = 0.35
 
+# 추정 차선으로부터 실제 차선으로 복귀할 때 연속 확인할 영상 수
+REACQUIRE_FRAMES = 5
+# 유효 관측이 끊겨도 위치/폭 기억은 잠시 보관 (주행 허용 시간이 아님)
+TRACK_MEMORY_SECONDS = 5.0
+# 기억한 폭과 새 쌍의 폭 차이: 각 기준 높이에서 검사
+WIDTH_CHANGE_RATIO = 0.12
+WIDTH_CHANGE_FLOOR_RATIO = 0.025
+# 보이는 차선을 따라 이동한 가상 차선과 새 후보의 허용 거리
+REACQUIRE_POSITION_RATIO = 0.06
+# 선분 방향 변화 허용치: 두 기준 높이 x 변화량의 차이 / 화면 폭
+DIRECTION_CHANGE_RATIO = 0.05
+
 # 한쪽 차선 후보가 받을 수 있는 최대 색상 가산점
 COLOR_BONUS = 40.0
 
@@ -100,6 +112,11 @@ class LaneTracker:
         self.last_seen = None
         self.lane_width = None
         self.width_count = 0
+        self.visible_side = None
+        self.recovery_count = 0
+        self.recovery_width = None
+        self.recovery_time = None
+        self.confirmed_color = np.zeros(2, dtype=float)
 
     def candidates(self, lines, height, width, color_mask=None, tape_mask=None):
         """허프 선분들을 묶어서 좌우 차선 후보를 만듭니다."""
@@ -274,7 +291,7 @@ class LaneTracker:
 
         if (
             self.last_seen is not None
-            and now - self.last_seen > HOLD_SECONDS
+            and now - self.last_seen > TRACK_MEMORY_SECONDS
         ):
             self.reset()
 
@@ -309,120 +326,157 @@ class LaneTracker:
             tape_mask,
         )
 
-        choices = []
-
-        for left_score, left, left_bonus in left_candidates:
-            for right_score, right, right_bonus in right_candidates:
-                widths = right - left
-
-                if not width * 0.12 < widths[1] < width * MAX_LANE_WIDTH_RATIO:
-                    continue
-
-                if not (
-                    -width * 0.03
-                    < widths[0]
-                    < widths[1] * 0.85
-                ):
-                    continue
-
-                if self.pair is None:
-                    if not left[1] < width * 0.5 < right[1]:
-                        continue
-
-                if not (
-                    width * LANE_X_MIN_RATIO < left.min()
-                    and right.max() < width * LANE_X_MAX_RATIO
-                ):
-                    continue
-
-                score = (
-                    min(left_score, 100)
-                    + min(right_score, 100)
-                    + left_bonus + right_bonus
-                )
-
-                choices.append((
-                    score,
-                    np.array([left, right]),
-                ))
-
-        # 양쪽 차선 실제 검출
-        if choices:
-            measured = max(
-                choices,
-                key=lambda item: item[0],
-            )[1]
-
-            measured_width = measured[1] - measured[0]
-
-            # 실제 양쪽 검출 결과로만 폭 학습
-            if np.all(measured_width > 0):
-                if self.lane_width is None:
-                    self.lane_width = measured_width.copy()
-                else:
-                    self.lane_width = (
-                        0.9 * self.lane_width
-                        + 0.1 * measured_width
-                    )
-
-                self.width_count += 1
-            else:
-                self.lane_width = None
-                self.width_count = 0
-
-            self.accept(measured, now)
-
-            return self.pair.copy(), "TRACKING"
-
-        ready = (
-            self.pair is not None
-            and self.lane_width is not None
-            and self.width_count >= WIDTH_LEARN_FRAMES
+        return self._select_candidates(
+            (left_candidates, right_candidates), width, now
         )
 
-        only_one_side = (
-            bool(left_candidates) != bool(right_candidates)
+    def _clear_recovery(self):
+        self.recovery_count = 0
+        self.recovery_width = None
+        self.recovery_time = None
+
+    def _width_matches(self, widths, width):
+        tolerance = np.maximum(
+            np.abs(self.lane_width) * WIDTH_CHANGE_RATIO,
+            width * WIDTH_CHANGE_FLOOR_RATIO,
         )
+        return bool(np.all(np.abs(widths - self.lane_width) <= tolerance))
 
-        # 한쪽 검출 시 기억한 차선 폭으로 반대쪽 추정
-        if ready and only_one_side:
-            if left_candidates:
-                left = left_candidates[0][1]
+    def _candidate_matches(self, candidate, side, width):
+        if self.pair is None:
+            return True
+        shift = candidate[1] - self.pair[side]
+        if np.max(np.abs(shift)) > width * 0.13:
+            return False
+        if abs(shift[1] - shift[0]) > width * DIRECTION_CHANGE_RATIO:
+            return False
+        # 이전에 색상 근거가 확실했던 선이 갑자기 무색 이음새로 바뀌는 것 방지.
+        # 처음부터 어두워 색상 근거가 약했던 선에는 강제 색상 필터를 적용하지 않음.
+        reference = self.confirmed_color[side]
+        return reference < 16.0 or candidate[2] >= reference * 0.5
 
-                measured = np.array([
-                    left,
-                    left + self.lane_width,
-                ])
-
-                status = "LEFT_ONLY"
-
+    def _confirm_pair(self, measured, selected, now):
+        measured_width = measured[1] - measured[0]
+        if np.all(measured_width > 0):
+            if self.lane_width is None:
+                self.lane_width = measured_width.copy()
             else:
-                right = right_candidates[0][1]
-
-                measured = np.array([
-                    right - self.lane_width,
-                    right,
-                ])
-
-                status = "RIGHT_ONLY"
-
-            movement = np.max(
-                np.abs(measured - self.pair)
-            )
-
-            if movement <= width * 0.13:
-                self.accept(measured, now)
-
-                return self.pair.copy(), status
-
-        if self.width_count < WIDTH_LEARN_FRAMES:
+                self.lane_width = 0.9 * self.lane_width + 0.1 * measured_width
+            self.width_count += 1
+        else:
             self.width_count = 0
             self.lane_width = None
+        colors = np.array([c[2] for c in selected])
+        if self.width_count <= 1:
+            self.confirmed_color = colors
+        else:
+            self.confirmed_color = 0.9 * self.confirmed_color + 0.1 * colors
+        self.visible_side = None
+        self._clear_recovery()
+        self.accept(measured, now)
+        return self.pair.copy(), "TRACKING"
 
-        if self.pair is not None:
+    def _missing(self, now):
+        self._clear_recovery()
+        # 위치/폭은 보관하지만 HELD와 LOST 모두 draw_result에서 주행 불허.
+        if self.pair is not None and now - self.last_seen <= HOLD_SECONDS:
             return self.pair.copy(), "HELD"
-
         return None, "LOST"
+
+    def _infer(self, candidate, side, width, now):
+        real = candidate[1]
+        measured = np.array([real, real + self.lane_width]) if side == 0 else np.array([
+            real - self.lane_width, real
+        ])
+        if np.max(np.abs(measured - self.pair)) > width * 0.13:
+            return self._missing(now)
+        self.visible_side = side
+        # 가상 차선 상태에서는 폭 및 색상 학습을 하지 않는다.
+        self.accept(measured, now)
+        return self.pair.copy(), "LEFT_ONLY" if side == 0 else "RIGHT_ONLY"
+
+    def _select_candidates(self, groups, width, now):
+        ready = (self.pair is not None and self.lane_width is not None
+                 and self.width_count >= WIDTH_LEARN_FRAMES)
+        if ready:
+            groups = tuple([
+                c for c in candidates if self._candidate_matches(c, side, width)
+            ] for side, candidates in enumerate(groups))
+        choices = []
+        for left in groups[0]:
+            for right in groups[1]:
+                measured = np.array([left[1], right[1]])
+                widths = measured[1] - measured[0]
+                if not width * 0.12 < widths[1] < width * MAX_LANE_WIDTH_RATIO:
+                    continue
+                if not -width * 0.03 < widths[0] < widths[1] * 0.85:
+                    continue
+                if self.pair is None and not left[1][1] < width * 0.5 < right[1][1]:
+                    continue
+                if not (width * LANE_X_MIN_RATIO < left[1].min()
+                        and right[1].max() < width * LANE_X_MAX_RATIO):
+                    continue
+                if ready:
+                    if not self._width_matches(widths, width):
+                        continue
+                    # 양쪽 차선의 공통 이동은 허용하고, 한쪽만 다른 선으로 튀는 변화는 검사.
+                    left_shift = measured[0] - self.pair[0]
+                    right_shift = measured[1] - self.pair[1]
+                    if np.max(np.abs(left_shift - right_shift)) > width * REACQUIRE_POSITION_RATIO:
+                        continue
+                score = min(left[0], 100) + min(right[0], 100) + left[2] + right[2]
+                choices.append((score, measured, (left, right)))
+
+        gap = self.last_seen is not None and now - self.last_seen > HOLD_SECONDS
+        recovering = self.visible_side is not None or self.recovery_count > 0 or gap
+        if choices:
+            _, measured, selected = max(choices, key=lambda item: item[0])
+            if not ready or not recovering:
+                return self._confirm_pair(measured, selected, now)
+            # 연속 프레임의 폭을 비교하므로, 커브에서 두 선이 함께 이동해도 허용.
+            widths = measured[1] - measured[0]
+            consistent = (
+                self.recovery_width is not None
+                and self.recovery_time is not None
+                and 0 < now - self.recovery_time <= HOLD_SECONDS
+                and np.max(np.abs(widths - self.recovery_width)) <= width * 0.025
+            )
+            self.recovery_count = self.recovery_count + 1 if consistent else 1
+            self.recovery_width = widths.copy()
+            self.recovery_time = now
+            if self.recovery_count >= REACQUIRE_FRAMES:
+                return self._confirm_pair(measured, selected, now)
+            if self.visible_side is not None:
+                return self._infer(selected[self.visible_side], self.visible_side, width, now)
+            # 양쪽 모두 잃었던 경우, 복귀 확인이 끝날 때까지 정지 상태 유지.
+            return None, "LOST"
+
+        self._clear_recovery()
+        if ready:
+            if self.visible_side is not None:
+                # 기존에 보이던 쪽을 유지. 반대쪽 잡음으로 기준을 즉시 바꾸지 않는다.
+                side = self.visible_side
+                if groups[side]:
+                    return self._infer(groups[side][0], side, width, now)
+            elif bool(groups[0]) != bool(groups[1]):
+                side = 0 if groups[0] else 1
+                return self._infer(groups[side][0], side, width, now)
+            elif groups[0] and groups[1]:
+                # 두 후보가 있지만 폭이 맞지 않는 경우, 더 확실한 한쪽만 사용.
+                best = (groups[0][0], groups[1][0])
+                distances = [np.max(np.abs(best[i][1] - self.pair[i])) for i in (0, 1)]
+                side = int(np.argmin(distances))
+                if distances[1 - side] - distances[side] > width * 0.02:
+                    return self._infer(best[side], side, width, now)
+                color_side = 0 if best[0][2] > best[1][2] else 1
+                if best[color_side][2] - best[1 - color_side][2] > 8.0:
+                    return self._infer(best[color_side], color_side, width, now)
+                # 어느 쪽이 진짜인지 불명확하면 추측 주행하지 않는다.
+        elif self.width_count < WIDTH_LEARN_FRAMES:
+            self.width_count = 0
+            self.lane_width = None
+        return self._missing(now)
+
 
 
 def draw_result(frame, pair, status):
