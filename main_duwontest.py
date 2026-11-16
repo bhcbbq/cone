@@ -8,8 +8,8 @@ import numpy as np
 import os
 from enum import Enum, auto
 
-# 교체된 차선 인식 모듈 임포트
-import lane_detection
+# 교체된 차선 인식 모듈 임포트 (main_final2.py 기준)
+from lane_detection_ver2 import LaneTracker, lane_edges, draw_result
 import ugv_control
 from ultrasonic_reader import UltrasonicReader
 
@@ -171,9 +171,8 @@ PASS_SPEED = 0.40             # m/s (대각선 및 직진 통과)
 
 # 거리 기반 회피 조건 파라미터
 FRONT_STOP_CM = 70.0         # 회피 시작 기준 거리 (전방 장애물 인식)
-FRONT_SAFE_CM = 70.0          # 회전 시 전방이 70cm 이상 확보되어야 회전 완료
 SIDE_DANGER_CM = 28.0         # 측면 28cm 미만일 경우 너무 가까워 임시 정지
-SIDE_CLEAR_CM = 50.0          # 측면 50cm 이상 멀어지면 장애물을 통과했다고 판단X
+SIDE_CLEAR_CM = 80.0          # 측면 80cm 이상 멀어지면 장애물을 통과했다고 판단
 
 ALIGN_TIME_S = 1.6
 TURN_ANGULAR_SPEED = 2.6     # 제자리 회전 각속도
@@ -284,68 +283,26 @@ def gstreamer_pipeline(
         )
     )
 
-def lane_edges(frame):
-    height, width = frame.shape[:2]
-
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    raw_edges = cv2.Canny(blurred, 50, 150)
-
-    hls = cv2.cvtColor(frame, cv2.COLOR_BGR2HLS)
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-
-    white = cv2.inRange(
-        hls,
-        (0, 150, 0),
-        (180, 255, 150),
-    )
-
-    yellow = cv2.inRange(
-        hsv,
-        (15, 65, 70),
-        (40, 255, 255),
-    )
-
-    colors = cv2.dilate(
-        white | yellow,
-        np.ones((5, 5), np.uint8),
-    )
-
-    edges = cv2.bitwise_and(raw_edges, colors)
-    mask = np.zeros_like(edges)
-
-    vertices = np.array(
-        [
-            [
-                (int(width * 0.05), int(height * 0.96)),
-                (int(width * 0.25), int(height * 0.40)),
-                (int(width * 0.75), int(height * 0.40)),
-                (int(width * 0.95), int(height * 0.96)),
-            ]
-        ],
-        dtype=np.int32,
-    )
-
-    cv2.fillPoly(mask, vertices, 255)
-    lane_edge_image = cv2.bitwise_and(edges, mask)
-
-    return raw_edges, lane_edge_image
-
-
-def process_lane_frame(frame):
+def process_lane_frame(frame, lane_tracker):
+    # 1. lane_detection_ver2의 lane_edges 사용
     raw_edges, edges = lane_edges(frame)
     
-    # 1. 허프 변환으로 차선 추출 (lane_detection.py 연동용)
-    lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=40, minLineLength=30, maxLineGap=20)
+    # 2. lane_detection_ver2의 LaneTracker로 차선 인식 업데이트
+    pair, lane_status = lane_tracker.update(
+        edges,
+        time.monotonic(),
+        frame=frame,
+    )
     
-    # 2. lane_detection.py의 calculate_steering 알고리즘으로 교체 적용
-    error, result_image, is_detected = lane_detection.calculate_steering(frame.copy(), lines)
+    # 3. draw_result로 FSM 제어에 필요한 error 및 검출 여부(is_detected) 산출
+    result_image, error, is_detected = draw_result(
+        frame.copy(),
+        pair,
+        lane_status,
+    )
     
-    # 3. FSM의 장애물 회피 로직 유지를 위한 처리 
-    # (FSM 내부 함수는 None이 입력될 경우 알아서 초음파 센서로 판별하거나 기본값을 따르도록 되어 있음)
-    avoidance_pair = None 
-    
-    return error, result_image, is_detected, avoidance_pair, raw_edges, edges
+    # 4. FSM의 장애물 회피 방향 판단을 위해 pair를 함께 반환
+    return error, result_image, is_detected, pair, raw_edges, edges
 
 
 def get_obstacle_direction_by_contour(frame, pair):
@@ -621,6 +578,9 @@ def main():
         control_thread = threading.Thread(target=control_thread_task, args=(ugv_serial,), daemon=True)
         control_thread.start()
         
+        # lane_detection_ver2 추적기 생성
+        lane_tracker = LaneTracker()
+        
         failure_count = 0
         report_time = time.monotonic()
 
@@ -637,8 +597,8 @@ def main():
 
             failure_count = 0
             
-            # 교체된 process_lane_frame 호출
-            error, result_image, is_detected, pair, raw_edges, lane_edges_img = process_lane_frame(frame)
+            # 교체된 process_lane_frame 호출 (lane_tracker 전달)
+            error, result_image, is_detected, pair, raw_edges, lane_edges_img = process_lane_frame(frame, lane_tracker)
             
             left_d, front_d, right_d = read_distances(ultrasonic)
 
