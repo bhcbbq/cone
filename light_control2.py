@@ -1005,6 +1005,9 @@ def ugv_receive_thread_task():
                             right_m = abs(odr - return_drive_start_odr) / 100.0
 
                             returned_m = (left_m + right_m) / 2.0
+                            
+                            # 복귀 진행거리 앱으로 전송
+                            send_hc12(f"DISTANCE:{returned_m:.2f}")
 
                             print(
                                 "[RETURN 거리]",
