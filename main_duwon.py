@@ -1,4 +1,4 @@
-# main_highway_contour_avoid_final_hybrid_optimized.py (수정본)
+# 최신 수정  대각선 전진 초음파 사용 안함, 복귀 가동 할때 차선이식 할때 까지 회전 안 함 
 import cv2
 import time
 import threading
@@ -490,14 +490,33 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
     # 3. 대각선 전진
     if state == State.AVOID_DIAGONAL:
         set_command(AVOID_SPEED, 0.0)
-        # 센서 인식 여부와 무관하게 50cm 마진 거리만큼만 전진
-        extra_time = 0.50 / AVOID_SPEED 
-        
-        if state_elapsed() >= extra_time:
+        extra_time = 0.50 / AVOID_SPEED
+
+        # 카메라 기반 차선 이탈 임박 감지
+        is_crossing_lane = False
+        if is_detected and pair is not None and len(pair) >= 2:
+            height, width = frame.shape[:2]
+            # 로봇 범퍼 바로 앞(화면 하단 y=0.9) 기준 차선 x좌표 계산
+            if avoid_direction == AvoidDirection.LEFT:
+                x_left = np.polyval(pair[0], 0.9)
+                # 좌측 차선이 화면 중앙(45% 지점) 이상 안쪽으로 들어오면 차선 침범 직전으로 판단
+                if x_left >= width * 0.45:
+                    is_crossing_lane = True
+            else:
+                x_right = np.polyval(pair[1], 0.9)
+                # 우측 차선이 화면 중앙(55% 지점) 이하 안쪽으로 들어오면 차선 침범 직전으로 판단
+                if x_right <= width * 0.55:
+                    is_crossing_lane = True
+
+        if is_crossing_lane:
             force_stop()
+            print("[차선 감지] 차선 침범 직전 -> 대각선 전진 중단 및 정렬 회전 시작", flush=True)
+            transition(State.AVOID_ALIGN)
+        elif state_elapsed() >= extra_time:
+            force_stop()
+            print("[마진 도달] 최대 거리 전진 완료 -> 정렬 회전 시작", flush=True)
             transition(State.AVOID_ALIGN)
         return
-
     # 4. 제자리 정렬
     if state == State.AVOID_ALIGN:
         run_imu_turn(-avoid_direction.value, State.AVOID_FORWARD)
