@@ -20,7 +20,7 @@ REACQUIRE_POSITION_RATIO = 0.06
 DIRECTION_CHANGE_RATIO = 0.05
 
 # 한쪽 차선 후보가 받을 수 있는 최대 색상 가산점
-COLOR_BONUS = 40.0
+COLOR_BONUS = 80.0
 
 # 화면 아래로 연장한 x좌표의 허용 범위: 화면 폭 기준 -50% ~ 150%.
 LANE_X_MIN_RATIO = -0.50
