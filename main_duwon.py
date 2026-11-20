@@ -506,12 +506,22 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
     # 5. 직진 통과
     if state == State.AVOID_FORWARD:
         set_command(PASS_SPEED, 0.0)
-        pass_time = 0.65 / PASS_SPEED
         
-        if state_elapsed() >= pass_time:
-            force_stop()
-            transition(State.RECOVERY_TURN_IN)
-        return
+        # 1단계: 센서 무관하게 무조건 70cm(0.7m) 전진하기 위한 최소 시간 계산
+        min_pass_time = 0.70 / PASS_SPEED
+        
+        # 70cm 이상 전진한 이후부터 측면 센서 검사 시작
+        if state_elapsed() >= min_pass_time:
+            # 회피 방향에 따라 장애물이 있는 측면 센서 선택
+            side_d = right_d if avoid_direction == AvoidDirection.LEFT else left_d
+            
+            # 2단계: 측면 센서에 장애물이 감지되지 않거나(< 0) 충분히 멀어지면(60cm 이상) 복귀 기동
+            if side_d >= 60.0 or side_d < 0:
+                force_stop()
+                print("[통과] 장애물 회피 완료 -> 복귀 기동 시작", flush=True)
+                transition(State.RECOVERY_TURN_IN)
+            # 조건에 만족하지 않으면 장애물이 아직 있는 것이므로 PASS_SPEED로 계속 전진 유지
+        return    
 
     # 6. 복귀 기동
     if state == State.RECOVERY_TURN_IN:
