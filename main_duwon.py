@@ -106,10 +106,8 @@ def turn_watchdog_reason(now):
         return "IMU feedback missing/stale"
     if now - ctx["started"] >= TURN_TIMEOUT_S:
         return "IMU turn timeout"
-    # ========= 안전 장치 삭제 구간 =========
-    # if now - ctx["last_motion"] >= IMU_NO_MOTION_TIMEOUT_S:
-    #     return "IMU yaw not changing during turn"
-    # =======================================
+    if now - ctx["last_motion"] >= IMU_NO_MOTION_TIMEOUT_S:
+        return "IMU yaw not changing during turn"
     return None
 
 
@@ -491,28 +489,13 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
 
     # 3. 대각선 전진
     if state == State.AVOID_DIAGONAL:
-        side_d = right_d if avoid_direction == AvoidDirection.LEFT else left_d
+        set_command(AVOID_SPEED, 0.0)
+        # 센서 인식 여부와 무관하게 50cm 마진 거리만큼만 전진
+        extra_time = 0.50 / AVOID_SPEED 
         
-        if not hasattr(run_fsm, 'clear_time'):
-            run_fsm.clear_time = None
-
-        if run_fsm.clear_time is None:
-            if 0.0 < side_d < SIDE_DANGER_CM:
-                force_stop()
-                print(f"[위험] 측면 장애물 초근접! ({side_d:.1f}cm) -> 충돌 방지 대기", flush=True)
-            elif side_d >= SIDE_CLEAR_CM or side_d < 0:
-                run_fsm.clear_time = time.monotonic()
-                print("[통과] 측면 클리어 -> 추가 50cm 마진 전진 시작", flush=True)
-            else:
-                set_command(AVOID_SPEED, 0.0)
-        else:
-            set_command(AVOID_SPEED, 0.0)
-            extra_time = 0.50 / AVOID_SPEED 
-            
-            if time.monotonic() - run_fsm.clear_time >= extra_time:
-                force_stop()
-                run_fsm.clear_time = None 
-                transition(State.AVOID_ALIGN)
+        if state_elapsed() >= extra_time:
+            force_stop()
+            transition(State.AVOID_ALIGN)
         return
 
     # 4. 제자리 정렬
@@ -532,9 +515,7 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
 
     # 6. 복귀 기동
     if state == State.RECOVERY_TURN_IN:
-        if check_recovery_lane_detection(is_detected):
-            reset_turn()
-            return
+        # 차선 탐색 조기 종료 없이 정렬 회전과 동일하게 끝까지 회전 수행
         run_imu_turn(-avoid_direction.value, State.RECOVERY_DIAGONAL)
         return
 
