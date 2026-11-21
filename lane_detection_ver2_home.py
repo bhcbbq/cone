@@ -16,9 +16,7 @@ LANE_X_MAX_RATIO = 1.50
 # 양쪽 차선 간격의 최대 허용값: 화면 폭의 200%.
 MAX_LANE_WIDTH_RATIO = 2.00
 
-# [집 테스트 추가] 노란 나무바닥에서 흰색 차선만 분리하기 위한 설정
-HOME_WHITE_L_MIN = 175
-HOME_WHITE_S_MAX = 65
+# [집 테스트 추가] 노란 바닥-흰 테이프 명도 차가 작은 실내 환경용 Canny 임계값
 HOME_CANNY_LOW = 30
 HOME_CANNY_HIGH = 90
 
@@ -29,11 +27,7 @@ def lane_edges(frame):
 
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    # [집 테스트 추가] 노란 바닥-흰 테이프 대비 보완 + 마루 틈새 에지 제외
     raw_edges = cv2.Canny(blurred, HOME_CANNY_LOW, HOME_CANNY_HIGH)
-    hls = cv2.cvtColor(frame, cv2.COLOR_BGR2HLS)
-    white_only = cv2.inRange(hls, (0, HOME_WHITE_L_MIN, 0), (180, 255, HOME_WHITE_S_MAX))
-    white_zone = cv2.dilate(white_only, np.ones((9, 9), np.uint8))
 
     mask = np.zeros_like(raw_edges)
 
@@ -45,7 +39,7 @@ def lane_edges(frame):
     ]], dtype=np.int32)
 
     cv2.fillPoly(mask, vertices, 255)
-    lane_edge_image = cv2.bitwise_and(cv2.bitwise_and(raw_edges, white_zone), mask)
+    lane_edge_image = cv2.bitwise_and(raw_edges, mask)
 
     return raw_edges, lane_edge_image
 
@@ -304,10 +298,13 @@ class LaneTracker:
             if frame.shape[:2] != edges.shape:
                 raise ValueError("frame과 edges의 해상도가 같아야 합니다.")
             hls = cv2.cvtColor(frame, cv2.COLOR_BGR2HLS)
-            # [집 테스트 추가] 노란 바닥 오인식 방지를 위해 저채도 흰색 테이프만 사용
-            white = cv2.inRange(hls, (0, HOME_WHITE_L_MIN, 0), (180, 255, HOME_WHITE_S_MAX))
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            white = cv2.inRange(hls, (0, 145, 0), (180, 255, 150))
+            # [집 테스트 추가] 실내 조명에서 어둡게 찍히는 흰 테이프(B > R) 보완
+            b_ch, _, r_ch = cv2.split(frame)
+            home_white = ((b_ch.astype(np.int16) - r_ch.astype(np.int16)) >= 15) & (hls[:, :, 1] >= 130)
             # 중심 계산에는 팽창시키지 않은 원래 색상 영역을 사용합니다.
-            tape_mask = white
+            tape_mask = cv2.bitwise_or(white, home_white.astype(np.uint8) * 255)
             color_mask = cv2.dilate(tape_mask, np.ones((5, 5), np.uint8))
 
         left_candidates, right_candidates = self.candidates(
