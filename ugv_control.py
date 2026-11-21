@@ -132,7 +132,7 @@ def calculate_pid(
             current_error - previous_error
         ) / dt
 
-    angular_z = (
+    angular_z = -(
         Kp * current_error
         + Kd * derivative
     )
