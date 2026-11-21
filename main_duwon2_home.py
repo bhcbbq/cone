@@ -170,7 +170,7 @@ SERIAL_BAUD = 115200
 FRAME_TIMEOUT = 0.5
 MAX_CAMERA_FAILURES = 3
 
-BASE_SPEED = 0.2             # m/s (일반 차선 추종)
+BASE_SPEED = 0.3             # m/s (일반 차선 추종)
 AVOID_SPEED = 0.15            # m/s 
 PASS_SPEED = 0.40             # m/s (대각선 및 직진 통과)
 
