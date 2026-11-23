@@ -26,9 +26,9 @@ TURN_ANGLE_DEG = 16.0           # 목표 회전 각도 (25도)
 TURN_TOLERANCE_DEG = 2.0        # 허용 오차 (도)
 
 # light_control2.py 스타일의 다이렉트 바퀴 속도 (L, R 직접 인가)
-DIRECT_TURN_SPEED = 0.18        # 기본 제자리 회전 바퀴 속도
-DIRECT_TURN_SLOW_SPEED = 0.14   # 목표각 근접 시 감속 바퀴 속도
-DIRECT_TURN_SLOW_REMAIN_DEG = 15.0
+DIRECT_TURN_SPEED = 0.15        # 기본 제자리 회전 바퀴 속도
+DIRECT_TURN_SLOW_SPEED = 0.11   # 목표각 근접 시 감속 바퀴 속도
+DIRECT_TURN_SLOW_REMAIN_DEG = 30
 
 TURN_TIMEOUT_S = 6.0
 IMU_STALE_TIMEOUT_S = 0.35
@@ -631,13 +631,11 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
         set_command(PASS_SPEED, 0.0)
         min_pass_time = 1.0 / PASS_SPEED
 
-        if state_elapsed() >= min_pass_time:
-            side_d = right_d if avoid_direction == AvoidDirection.LEFT else left_d
-            if side_d >= 60.0 or side_d < 0:
-                force_stop()
-                print("[통과] 장애물 회피 완료 -> 복귀 기동 시작", flush=True)
-                reset_turn()
-                transition(State.RECOVERY_TURN_IN)
+    if state_elapsed() >= min_pass_time:  # min_pass_time 대신 2.0 등 고정 시간 사용 가능
+        force_stop()
+        print("[통과] 지정 시간 직진 완료 -> 복귀 기동 시작", flush=True)
+        reset_turn()
+        transition(State.RECOVERY_TURN_IN)
         return
 
     # 6. 복귀 기동 (25도 다이렉트 바퀴 제어)
