@@ -574,7 +574,7 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
 
     # 3. 대각선 전진 (차선 넘음 감지 알고리즘 제거 -> 지정 시간 동안 대각선 이동)
     if state == State.AVOID_DIAGONAL:
-        extra_time = 0.60 / AVOID_SPEED
+        extra_time = 0.65 / AVOID_SPEED
 
         if state_elapsed() >= extra_time:
             force_stop()
