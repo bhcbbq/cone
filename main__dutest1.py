@@ -166,9 +166,9 @@ AVOID_SPEED = 0.15            # m/s (대각선 회피 속도)
 PASS_SPEED = 0.40             # m/s (직진 통과 속도)
 
 # ★ 가감속 램핑 제한 파라미터 (돌입 전류 및 전압 강하 억제)
-MAX_LINEAR_ACCEL = 0.6        # 초당 직진 가속도 제한 (m/s^2) -> 0.3m/s 도달에 약 0.5초 소요
-MAX_LINEAR_DECEL = 1.2        # 초당 직진 감속도 제한 (m/s^2) -> 감속은 가속보다 빠르게
-MAX_ANGULAR_ACCEL = 2.5       # 초당 회전 가속도 제한 (rad/s^2)
+MAX_LINEAR_ACCEL = 0.8     # 초당 직진 가속도 제한 (m/s^2) -> 0.3m/s 도달에 약 0.5초 소요
+MAX_LINEAR_DECEL = 1.4        # 초당 직진 감속도 제한 (m/s^2) -> 감속은 가속보다 빠르게
+MAX_ANGULAR_ACCEL = 3       # 초당 회전 가속도 제한 (rad/s^2)
 
 # 거리 기반 회피 조건 파라미터
 FRONT_STOP_CM = 70.0
