@@ -22,13 +22,13 @@ import json
 # IMU & Direct Wheel Turn Settings (light_control2 방식 반영)
 # ============================================================
 IMU_YAW_UNIT = "rad"
-TURN_ANGLE_DEG = 25.0           # 목표 회전 각도 (25도)
+TURN_ANGLE_DEG = 16.0           # 목표 회전 각도 (25도)
 TURN_TOLERANCE_DEG = 2.0        # 허용 오차 (도)
 
 # light_control2.py 스타일의 다이렉트 바퀴 속도 (L, R 직접 인가)
-DIRECT_TURN_SPEED = 0.25        # 기본 제자리 회전 바퀴 속도
-DIRECT_TURN_SLOW_SPEED = 0.18   # 목표각 근접 시 감속 바퀴 속도
-DIRECT_TURN_SLOW_REMAIN_DEG = 10.0
+DIRECT_TURN_SPEED = 0.18        # 기본 제자리 회전 바퀴 속도
+DIRECT_TURN_SLOW_SPEED = 0.14   # 목표각 근접 시 감속 바퀴 속도
+DIRECT_TURN_SLOW_REMAIN_DEG = 15.0
 
 TURN_TIMEOUT_S = 6.0
 IMU_STALE_TIMEOUT_S = 0.35
