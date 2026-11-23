@@ -10,6 +10,10 @@ SMOOTH_ALPHA = 0.35
 # 한쪽 차선 후보가 받을 수 있는 최대 색상 가산점
 COLOR_BONUS = 40.0
 
+# 차선으로 인정할 선분 주변 최소 색상(흰색/노란색) 비율 (0.0 ~ 1.0)
+# 이 값 미만인 선분(도로 이음새 등)은 차선 후보에서 제외합니다.
+MIN_COLOR_RATIO = 0.25
+
 # 화면 아래로 연장한 x좌표의 허용 범위: 화면 폭 기준 -50% ~ 150%.
 LANE_X_MIN_RATIO = -0.50
 LANE_X_MAX_RATIO = 1.50
@@ -156,12 +160,14 @@ class LaneTracker:
 
             length = min(np.hypot(dx, dy), 80)
 
-            # 에지를 삭제하지 않고, 선분 주변의 흰색/노란색 비율만 측정합니다.
+            # 선분 주변의 흰색/노란색 비율을 측정해 최소 기준 미만(도로 이음새 등)은 제외합니다.
             color_ratio = 0.0
             if color_mask is not None:
                 xs = np.clip(np.rint(np.linspace(x1, x2, 24)).astype(int), 0, width - 1)
                 ys = np.clip(np.rint(np.linspace(y1, y2, 24)).astype(int), 0, height - 1)
                 color_ratio = float(np.mean(color_mask[ys, xs] > 0))
+                if color_ratio < MIN_COLOR_RATIO:
+                    continue
 
             segments.append((
                 side,
