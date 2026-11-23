@@ -21,7 +21,7 @@ LANE_X_MAX_RATIO = 1.50
 MIN_LANE_WIDTH_RATIO = 0.80
 MAX_LANE_WIDTH_RATIO = 2.00
 # 학습된 차선 폭(self.lane_width) 대비 허용 오차 비율 (±25%)
-LEARNED_WIDTH_TOLERANCE = 0.25
+LEARNED_WIDTH_TOLERANCE = 0.20
 
 
 def lane_edges(frame):
