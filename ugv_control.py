@@ -143,7 +143,7 @@ def calculate_pid(
         )
 
     # 기존 조향 방향과 출력 상한 유지
-    MAX_ANGULAR_Z = 1.5
+    MAX_ANGULAR_Z = 0.5
 
     return max(
         -MAX_ANGULAR_Z,
