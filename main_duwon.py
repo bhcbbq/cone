@@ -508,10 +508,10 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
             height, width = frame.shape[:2]
             if avoid_direction == AvoidDirection.LEFT:
                 x_left = np.polyval(pair[0], 0.9)
-                if x_left >= width * 0.45: is_crossing_lane = True
+                if x_left >= width * 0.7: is_crossing_lane = True
             else:
                 x_right = np.polyval(pair[1], 0.9)
-                if x_right <= width * 0.55: is_crossing_lane = True
+                if x_right <= width * 0.3: is_crossing_lane = True
 
         if is_crossing_lane or state_elapsed() >= extra_time:
             force_stop()
