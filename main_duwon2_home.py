@@ -1,7 +1,8 @@
-# 최신 수정:
+    # 최신 수정:
 # 1. 대각선 전진(AVOID_DIAGONAL) 시 차선 넘음 감지 알고리즘 제거 (고정 거리/시간 이동)
 # 2. 모든 제자리 회전(AVOID_TURN_OUT, AVOID_ALIGN, RECOVERY_TURN_IN)을 light_control2 방식의
 #    다이렉트 좌/우 바퀴 제어({"T":1,"L":...,"R":...}) 및 IMU Yaw 누적/목표각 제어로 변경 (25도)
+# 3. SerialTimeoutException(Write timeout) 발생 시 제어 스레드가 중단되지 않도록 try-except 방어 적용
 import cv2
 import time
 import threading
@@ -56,14 +57,17 @@ def get_imu_snapshot():
 
 
 def send_raw_ugv(ugv_serial, message):
-    """light_control2.py와 동일하게 UGV에 다이렉트 JSON 명령 전송"""
+    """light_control2.py와 동일하게 UGV에 다이렉트 JSON 명령 전송 (타임아웃 예외 방어 포함)"""
     if ugv_serial is None:
         return
     if not message.endswith("\n"):
         message += "\n"
-    with ugv_write_lock:
-        ugv_serial.write(message.encode("utf-8"))
-        ugv_serial.flush()
+    try:
+        with ugv_write_lock:
+            ugv_serial.write(message.encode("utf-8"))
+            ugv_serial.flush()
+    except Exception as exc:
+        print(f"[경고] UGV 다이렉트 시리얼 전송 지연 무시: {type(exc).__name__}: {exc}", flush=True)
 
 
 def ugv_imu_read_task(ugv_serial):
@@ -425,7 +429,7 @@ def control_thread_task(ugv_serial):
     previous_error = previous_frame_time = None
     angular_z = 0.0
 
-    print("[알림] 제어 스레드 시작", flush=True)
+    print("[알림] 제어 스레드 시작 (시리얼 타임아웃 보호 활성화)", flush=True)
     try:
         while is_running:
             now = time.monotonic()
@@ -463,8 +467,11 @@ def control_thread_task(ugv_serial):
                     angular_z = ugv_control.calculate_pid(c_err, previous_error, dt)
                     previous_error, previous_frame_time = c_err, f_time
 
-                with ugv_write_lock:
-                    ugv_control.send_driving_command(ugv_serial, c_spd, angular_z)
+                try:
+                    with ugv_write_lock:
+                        ugv_control.send_driving_command(ugv_serial, c_spd, angular_z)
+                except Exception as serial_exc:
+                    print(f"[경고] UGV 주행 시리얼 전송 지연 무시: {type(serial_exc).__name__}: {serial_exc}", flush=True)
 
             time.sleep(CONTROL_PERIOD_S)
     except Exception as exc:
@@ -472,10 +479,7 @@ def control_thread_task(ugv_serial):
         print(f"[에러] 제어 스레드 중단: {control_failure}", flush=True)
         is_running = False
     finally:
-        try:
-            send_raw_ugv(ugv_serial, '{"T":1,"L":0.0,"R":0.0}')
-        except Exception:
-            pass
+        send_raw_ugv(ugv_serial, '{"T":1,"L":0.0,"R":0.0}')
 
 
 # ============================================================
@@ -745,11 +749,8 @@ def main():
 
         if ugv_serial is not None:
             for _ in range(3):
-                try:
-                    send_raw_ugv(ugv_serial, '{"T":1,"L":0.0,"R":0.0}')
-                    time.sleep(0.05)
-                except Exception:
-                    pass
+                send_raw_ugv(ugv_serial, '{"T":1,"L":0.0,"R":0.0}')
+                time.sleep(0.05)
             ugv_control.stop_ugv(ugv_serial)
 
         if ultrasonic is not None:
