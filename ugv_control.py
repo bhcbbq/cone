@@ -92,7 +92,7 @@ def calculate_pid(
     current_error,
     previous_error,
     dt,
-    Kp=0.001,
+    Kp=0.002,
     Kd=0.0001,
 ):
     """
@@ -132,8 +132,24 @@ def calculate_pid(
             current_error - previous_error
         ) / dt
 
+    # 2단계 비례 제어:
+    # - ±50 px 이내: 기존 Kp(0.001)로 부드럽게 직진 유지
+    # - ±50 px 초과: 초과분에 KP_LARGE를 적용해 큰 이탈 시 빠르게 복귀
+    ERROR_BOOST_THRESHOLD = 50.0
+    KP_LARGE = 0.0035
+
+    abs_err = abs(current_error)
+    if abs_err <= ERROR_BOOST_THRESHOLD:
+        p_term = Kp * current_error
+    else:
+        sign = 1.0 if current_error > 0 else -1.0
+        p_term = sign * (
+            Kp * ERROR_BOOST_THRESHOLD
+            + KP_LARGE * (abs_err - ERROR_BOOST_THRESHOLD)
+        )
+
     angular_z = (
-        Kp * current_error
+        p_term
         + Kd * derivative
     )
 
@@ -142,8 +158,8 @@ def calculate_pid(
             "계산한 조향값이 유효하지 않습니다"
         )
 
-    # 기존 조향 방향과 출력 상한 유지
-    MAX_ANGULAR_Z = 0.5
+    # 큰 오차 복귀 시 출력 여유 확보 (기존 0.5 -> 0.7)
+    MAX_ANGULAR_Z = 0.7
 
     return max(
         -MAX_ANGULAR_Z,
