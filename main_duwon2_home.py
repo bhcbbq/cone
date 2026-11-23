@@ -242,6 +242,7 @@ class State(Enum):
     AVOID_PAUSE = auto()
     AVOID_DIAGONAL = auto()
     AVOID_ALIGN = auto()
+    AVOID_ALIGN_PAUSE = auto()
     AVOID_FORWARD = auto()
     RECOVERY_TURN_IN = auto()
     RECOVERY_DIAGONAL = auto()
@@ -611,14 +612,20 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
         if remaining <= TURN_TOLERANCE_DEG:
             force_stop()
             print(f"[정렬 완료] 목표: {target_yaw:.1f} / 현재: {yaw:.1f}", flush=True)
-            transition(State.AVOID_FORWARD)
+            transition(State.AVOID_ALIGN_PAUSE)
             return
 
         turn_dir = 1.0 if diff > 0 else -1.0
         left_wheel, right_wheel = compute_direct_wheel_turn(turn_dir, remaining)
         set_direct_wheel_command(left_wheel, right_wheel)
         return
-
+# 4-1. 정렬 완료 후 잠시 대기 (관성 제어 및 안정화)
+    if state == State.AVOID_ALIGN_PAUSE:
+        force_stop() # 차체 강제 정지 유지
+        if state_elapsed() >= 0.7:  # <--- 0.7초 딜레이 (원하는 시간으로 수정 가능)
+            print("[정렬 딜레이 완료] 직진 통과 시작", flush=True)
+            transition(State.AVOID_FORWARD)
+        return
     # 5. 직진 통과
     if state == State.AVOID_FORWARD:
         set_command(PASS_SPEED, 0.0)
