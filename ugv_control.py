@@ -159,7 +159,7 @@ def calculate_pid(
         )
 
     # 큰 오차 복귀 시 출력 여유 확보 (기존 0.5 -> 0.7)
-    MAX_ANGULAR_Z = 0.7
+    MAX_ANGULAR_Z = 0.5
 
     return max(
         -MAX_ANGULAR_Z,
