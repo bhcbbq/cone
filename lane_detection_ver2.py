@@ -17,8 +17,11 @@ MIN_COLOR_RATIO = 0.25
 # 화면 아래로 연장한 x좌표의 허용 범위: 화면 폭 기준 -50% ~ 150%.
 LANE_X_MIN_RATIO = -0.50
 LANE_X_MAX_RATIO = 1.50
-# 양쪽 차선 간격의 최대 허용값: 화면 폭의 200%.
+# 양쪽 차선 간격의 최소/최대 허용값 (화면 폭 비율, 검정 도로 실측 폭 ~1.34 기준)
+MIN_LANE_WIDTH_RATIO = 0.80
 MAX_LANE_WIDTH_RATIO = 2.00
+# 학습된 차선 폭(self.lane_width) 대비 허용 오차 비율 (±25%)
+LEARNED_WIDTH_TOLERANCE = 0.25
 
 
 def lane_edges(frame):
@@ -321,8 +324,21 @@ class LaneTracker:
             for right_score, right, right_bonus in right_candidates:
                 widths = right - left
 
-                if not width * 0.12 < widths[1] < width * MAX_LANE_WIDTH_RATIO:
+                if not width * MIN_LANE_WIDTH_RATIO < widths[1] < width * MAX_LANE_WIDTH_RATIO:
                     continue
+
+                # 폭 학습이 완료된 상태에서는 기존 차선 폭과 크게 다른 조합(한 차선 양 경계, 이음새)을 제외합니다.
+                if (
+                    self.lane_width is not None
+                    and self.width_count >= WIDTH_LEARN_FRAMES
+                ):
+                    learned_width = self.lane_width[1]
+                    if not (
+                        learned_width * (1.0 - LEARNED_WIDTH_TOLERANCE)
+                        <= widths[1]
+                        <= learned_width * (1.0 + LEARNED_WIDTH_TOLERANCE)
+                    ):
+                        continue
 
                 if not (
                     -width * 0.03
