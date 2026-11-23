@@ -2,10 +2,13 @@ import cv2
 import numpy as np
 
 
-# 기존 ver2 설정 유지
+# 기존 ver2 설정 유지 (반응 지연 축소를 위해 SMOOTH_ALPHA만 0.35 -> 0.50 조정)
 HOLD_SECONDS = 0.20
 WIDTH_LEARN_FRAMES = 3
-SMOOTH_ALPHA = 0.35
+SMOOTH_ALPHA = 0.50
+
+# 조향 오차를 계산할 전방 주시 높이 비율 (0.55 ~ 0.65 사이에서 조정)
+LOOKAHEAD_Y_RATIO = 0.60
 
 # 한쪽 차선 후보가 받을 수 있는 최대 색상 가산점
 COLOR_BONUS = 40.0
@@ -21,7 +24,7 @@ LANE_X_MAX_RATIO = 1.50
 MIN_LANE_WIDTH_RATIO = 0.80
 MAX_LANE_WIDTH_RATIO = 2.00
 # 학습된 차선 폭(self.lane_width) 대비 허용 오차 비율 (±25%)
-LEARNED_WIDTH_TOLERANCE = 0.20
+LEARNED_WIDTH_TOLERANCE = 0.25
 
 
 def lane_edges(frame):
@@ -451,10 +454,11 @@ def draw_result(frame, pair, status):
     """결과 이미지와 중심 오차를 반환하며 창은 띄우지 않습니다."""
     height, width = frame.shape[:2]
     camera_x = width // 2
+    marker_y = int(height * LOOKAHEAD_Y_RATIO)
 
     cv2.line(
         frame,
-        (camera_x, int(height * 0.60)),
+        (camera_x, min(int(height * 0.60), marker_y)),
         (camera_x, height - 1),
         (100, 100, 100),
         1,
@@ -494,6 +498,14 @@ def draw_result(frame, pair, status):
             / (y_bottom - y_top)
         )
 
+        # 전방 주시 높이(marker_y)에서의 좌우 차선 좌표
+        lookaheads = (
+            pair[:, 0]
+            + (pair[:, 1] - pair[:, 0])
+            * (marker_y - y_top)
+            / (y_bottom - y_top)
+        )
+
         for side, bottom in enumerate(bottoms):
             inferred = (
                 (status == "LEFT_ONLY" and side == 1)
@@ -521,6 +533,7 @@ def draw_result(frame, pair, status):
 
         draw_center_top = float(np.mean(draw_tops))
         center_bottom = float(np.mean(bottoms))
+        center_lookahead = float(np.mean(lookaheads))
 
         # 노란색 중앙선도 동일한 높이까지 연장
         cv2.line(
@@ -532,21 +545,20 @@ def draw_result(frame, pair, status):
             cv2.LINE_AA,
         )
 
-        # 조향 오차 계산: 기존 방식 그대로 유지
-        error = camera_x - center_bottom
-        marker_y = height - 30
+        # 전방 주시점 기준 조향 오차 계산 (횡오차 + 차체 방향각 동시 반영)
+        error = camera_x - center_lookahead
 
         cv2.line(
             frame,
             (camera_x, marker_y),
-            (int(center_bottom), marker_y),
+            (int(center_lookahead), marker_y),
             (0, 0, 255),
             1,
         )
 
         cv2.circle(
             frame,
-            (int(center_bottom), marker_y),
+            (int(center_lookahead), marker_y),
             5,
             (0, 255, 0),
             -1,
@@ -562,7 +574,7 @@ def draw_result(frame, pair, status):
 
     cv2.circle(
         frame,
-        (camera_x, height - 30),
+        (camera_x, marker_y),
         5,
         (255, 0, 0),
         -1,

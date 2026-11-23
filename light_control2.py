@@ -1308,7 +1308,7 @@ def gstreamer_pipeline(
         "videoconvert ! "
         "video/x-raw, "
         "format=(string)BGR ! "
-        "appsink"
+        "appsink drop=1 max-buffers=1"
         % (
             sensor_id,
             capture_width,
