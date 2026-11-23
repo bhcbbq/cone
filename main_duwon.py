@@ -1,4 +1,6 @@
 # 최신 수정  대각선 전진 초음파 사용 안함, 복귀 가동 할때 차선이식 할때 까지 회전 안 함 
+# 정렬 회전 할때 처음 장애물 감지 시점의 yaw값이 될때까지 회전  수정 
+# 차선 안 넘어가게 하는 알고리즘 값 수정 해야 될 거 같음
 import cv2
 import time
 import threading
@@ -468,60 +470,91 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
             set_command(BASE_SPEED, None, error=error)
         return
 
-    # 1-1. 장애물 발견 직후 완전 정지 (유지)
+   
+   # 1-1. 장애물 발견 직후 완전 정지 (초기 각도 기억)
     if state == State.AVOID_START_PAUSE:
         force_stop()
         if state_elapsed() >= 0.6: 
+            # 안정화된 후의 원래 차선 방향을 기억
+            yaw, stamp, _ = get_imu_snapshot()
+            run_fsm.initial_yaw = yaw
+            print(f"[기준 각도 저장] initial_yaw = {yaw:.2f} deg", flush=True)
             transition(State.AVOID_TURN_OUT)
         return
 
-    # 2. 제자리 회전
+    # 2. 제자리 회전 (기존과 동일)
     if state == State.AVOID_TURN_OUT:
         run_imu_turn(avoid_direction.value, State.AVOID_PAUSE)
         return
 
-    # 2-1. 회전 후 잠시 대기
+    # 2-1. 회전 후 잠시 대기 (대각선 유지용 각도 기억)
     if state == State.AVOID_PAUSE:
         force_stop()
         if state_elapsed() >= 0.3:
+            # 첫 회전을 마친 후의 대각선 방향을 기억
+            yaw, stamp, _ = get_imu_snapshot()
+            run_fsm.diagonal_yaw = yaw
+            print(f"[대각선 각도 저장] diagonal_yaw = {yaw:.2f} deg", flush=True)
             transition(State.AVOID_DIAGONAL)
         return
 
-    # 3. 대각선 전진
+    # 3. 대각선 전진 (Yaw 피드백 제어 적용)
     if state == State.AVOID_DIAGONAL:
-        set_command(AVOID_SPEED, 0.0)
         extra_time = 0.50 / AVOID_SPEED
 
-        # 카메라 기반 차선 이탈 임박 감지
+        # 차선 이탈 직전 감지 로직 (기존 유지)
         is_crossing_lane = False
         if is_detected and pair is not None and len(pair) >= 2:
             height, width = frame.shape[:2]
-            # 로봇 범퍼 바로 앞(화면 하단 y=0.9) 기준 차선 x좌표 계산
             if avoid_direction == AvoidDirection.LEFT:
                 x_left = np.polyval(pair[0], 0.9)
-                # 좌측 차선이 화면 중앙(45% 지점) 이상 안쪽으로 들어오면 차선 침범 직전으로 판단
-                if x_left >= width * 0.45:
-                    is_crossing_lane = True
+                if x_left >= width * 0.45: is_crossing_lane = True
             else:
                 x_right = np.polyval(pair[1], 0.9)
-                # 우측 차선이 화면 중앙(55% 지점) 이하 안쪽으로 들어오면 차선 침범 직전으로 판단
-                if x_right <= width * 0.55:
-                    is_crossing_lane = True
+                if x_right <= width * 0.55: is_crossing_lane = True
 
-        if is_crossing_lane:
+        if is_crossing_lane or state_elapsed() >= extra_time:
             force_stop()
-            print("[차선 감지] 차선 침범 직전 -> 대각선 전진 중단 및 정렬 회전 시작", flush=True)
+            print("[대각선 전진 종료] 정렬 회전 시작", flush=True)
             transition(State.AVOID_ALIGN)
-        elif state_elapsed() >= extra_time:
-            force_stop()
-            print("[마진 도달] 최대 거리 전진 완료 -> 정렬 회전 시작", flush=True)
-            transition(State.AVOID_ALIGN)
+            return
+            
+        # ★ Yaw 피드백 제어: 대각선 주행 중 틀어짐 보정
+        yaw, stamp, _ = get_imu_snapshot()
+        target_yaw = getattr(run_fsm, 'diagonal_yaw', yaw)
+        diff = normalize_delta(target_yaw - yaw)
+        
+        # 오차(diff)에 비례하여 미세하게 조향(최대 +- 0.3 rad/s 로 제한하여 부드럽게)
+        correction_angular = max(-0.3, min(0.3, TURN_KP * diff))
+        set_command(AVOID_SPEED, correction_angular)
         return
-    # 4. 제자리 정렬
+
+    # 4. 제자리 정렬 (초기 각도 initial_yaw 로 복귀)
     if state == State.AVOID_ALIGN:
-        run_imu_turn(-avoid_direction.value, State.AVOID_FORWARD)
-        return
+        now = time.monotonic()
+        yaw, stamp, _ = get_imu_snapshot()
 
+        if state_elapsed() >= TURN_TIMEOUT_S:
+            force_stop()
+            print("[정렬 타임아웃] 강제 직진 전환", flush=True)
+            transition(State.AVOID_FORWARD)
+            return
+
+        target_yaw = getattr(run_fsm, 'initial_yaw', yaw)
+        diff = normalize_delta(target_yaw - yaw)
+
+        # 오차가 허용 범위 이내로 들어오면 회전 종료
+        if abs(diff) <= TURN_TOLERANCE_DEG:
+            force_stop()
+            print(f"[정렬 완료] 목표: {target_yaw:.1f} / 현재: {yaw:.1f}", flush=True)
+            transition(State.AVOID_FORWARD)
+            return
+
+        # P제어 기반 절대 각도 회전
+        turn_dir = 1.0 if diff > 0 else -1.0
+        angular = min(TURN_MAX_SPEED, max(TURN_MIN_SPEED, TURN_KP * abs(diff)))
+        set_command(0.0, turn_dir * angular)
+        return
     # 5. 직진 통과
     if state == State.AVOID_FORWARD:
         set_command(PASS_SPEED, 0.0)
