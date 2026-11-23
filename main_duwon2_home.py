@@ -622,7 +622,7 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
     # 5. 직진 통과
     if state == State.AVOID_FORWARD:
         set_command(PASS_SPEED, 0.0)
-        min_pass_time = 0.70 / PASS_SPEED
+        min_pass_time = 1.0 / PASS_SPEED
 
         if state_elapsed() >= min_pass_time:
             side_d = right_d if avoid_direction == AvoidDirection.LEFT else left_d
