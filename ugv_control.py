@@ -93,7 +93,7 @@ def calculate_pid(
     previous_error,
     dt,
     Kp=0.001,
-    Kd=0.0001,
+    Kd=0.000,
 ):
     """
     차선 오차로 조향 각속도를 계산하는 PD 제어입니다.
@@ -136,7 +136,7 @@ def calculate_pid(
     # - ±50 px 이내: 기존 Kp(0.001)로 부드럽게 직진 유지
     # - ±50 px 초과: 초과분에 KP_LARGE를 적용해 큰 이탈 시 빠르게 복귀
     ERROR_BOOST_THRESHOLD = 100.0
-    KP_LARGE = 0.002
+    KP_LARGE = 0.001
 
     abs_err = abs(current_error)
     if abs_err <= ERROR_BOOST_THRESHOLD:
