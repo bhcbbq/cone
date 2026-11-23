@@ -14,7 +14,7 @@ from light_control import LightControl
 # SETTINGS
 # ============================================================
 
-BASE_SPEED = 0.2
+BASE_SPEED = 0.25
 
 # 수동 주행 전용 속도
 # 앱 수동 페이지의 슬라이더(SPEED:0.20 ~ 0.50)로 변경
