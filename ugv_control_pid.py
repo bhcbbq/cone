@@ -158,7 +158,7 @@ def calculate_pid(
     # 2) 적분(I) 제어:
     # - ±15 px 바깥: 오차 누적 + 출력 상한(MAX_I_TERM)으로 와인드업 방지
     # - ±15 px 이내: 누적 중단 후 잔류 적분값을 서서히 감쇠 (오버슈트 억제)
-    I_DEADBAND = 15.0
+    I_DEADBAND = 30.0
     MAX_I_TERM = 0.08
     I_DEADBAND_DECAY = 0.95
 
