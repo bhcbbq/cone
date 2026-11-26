@@ -107,7 +107,7 @@ def calculate_pid(
         시작 또는 재출발 첫 측정이므로 D항을 0으로 처리.
 
     integral_error:
-        이전까지 누적된 오차 적분값 (Anti-windup 적용).
+        이전까지 누적된 오차 적분값 (Anti-windup 및 불감대 감쇠 적용).
     """
     values = (
         current_error,
@@ -156,10 +156,11 @@ def calculate_pid(
         )
 
     # 2) 적분(I) 제어:
-    # - ±15 px 이내: 적분 누적 중단 (중앙 부근 재진동 방지)
-    # - 출력 상한(MAX_I_TERM)으로 와인드업 방지
+    # - ±15 px 바깥: 오차 누적 + 출력 상한(MAX_I_TERM)으로 와인드업 방지
+    # - ±15 px 이내: 누적 중단 후 잔류 적분값을 서서히 감쇠 (오버슈트 억제)
     I_DEADBAND = 15.0
     MAX_I_TERM = 0.08
+    I_DEADBAND_DECAY = 0.95
 
     if Ki > 0.0:
         if abs_err > I_DEADBAND:
@@ -169,6 +170,11 @@ def calculate_pid(
                 -max_integral,
                 min(max_integral, integral_error),
             )
+        else:
+            integral_error *= I_DEADBAND_DECAY
+            if abs(integral_error) < 1e-3:
+                integral_error = 0.0
+
         i_term = Ki * integral_error
     else:
         integral_error = 0.0
