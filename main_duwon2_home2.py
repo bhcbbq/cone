@@ -1,8 +1,9 @@
 # 최신 수정:
 # 1. 대각선 전진(AVOID_DIAGONAL) 시 차선 넘음 감지 알고리즘 제거 (고정 거리/시간 이동)
 # 2. 모든 제자리 회전(AVOID_TURN_OUT, AVOID_ALIGN, RECOVERY_TURN_IN)을 light_control2 방식의
-#    다이렉트 좌/우 바퀴 제어({"T":1,"L":...,"R":...}) 및 IMU Yaw 누적/목표각 제어로 변경
-# 3. SerialTimeoutException(Write timeout) 발생 시 제어 스레드가 중단되지 않도록 try-except 방어 적용
+#    다이렉트 좌/우 바퀴 제어({"T":1,"L":...,"R":...}) 및 출발 기준 절대각(track_front_yaw) 제어로 변경
+# 3. 2단계 감속(DIRECT_TURN_FINE_SPEED) 및 목표각 도달 후 관성 오버슈트 안정화/역보정(TURN_SETTLE_S) 적용
+# 4. SerialTimeoutException(Write timeout) 발생 시 제어 스레드가 중단되지 않도록 try-except 방어 적용
 import cv2
 import time
 import threading
@@ -28,8 +29,11 @@ TURN_TOLERANCE_DEG = 2.0        # 허용 오차 (도)
 
 # light_control2.py 스타일의 다이렉트 바퀴 속도 (L, R 직접 인가)
 DIRECT_TURN_SPEED = 0.15        # 기본 제자리 회전 바퀴 속도
-DIRECT_TURN_SLOW_SPEED = 0.11   # 목표각 근접 시 감속 바퀴 속도
-DIRECT_TURN_SLOW_REMAIN_DEG = 30
+DIRECT_TURN_SLOW_SPEED = 0.11   # 목표각 근접 시 1차 감속 바퀴 속도
+DIRECT_TURN_SLOW_REMAIN_DEG = 30.0
+DIRECT_TURN_FINE_SPEED = 0.095  # 목표각 직전 2차 미세 감속 바퀴 속도 (바닥 마찰로 안 돌면 0.105로 상향)
+DIRECT_TURN_FINE_REMAIN_DEG = 12.0
+TURN_SETTLE_S = 0.4             # 목표각 도달 후 관성 정지 확인 시간(초)
 
 TURN_TIMEOUT_S = 10.0
 IMU_STALE_TIMEOUT_S = 0.35
@@ -46,6 +50,7 @@ shared_yaw_seq = 0
 imu_read_error = None
 turn_context = None
 safety_fault = None
+track_front_yaw = None          # 출발 시 저장되는 직선 도로 정면 기준각
 
 
 def normalize_delta(degrees):
@@ -120,6 +125,7 @@ def latch_safety_fault(reason):
 def reset_turn():
     global turn_context
     turn_context = None
+    run_direct_target_yaw_turn.settle_start = None
 
 
 def turn_watchdog_reason(now):
@@ -138,72 +144,60 @@ def turn_watchdog_reason(now):
 
 def compute_direct_wheel_turn(direction_sign, remaining_deg):
     """
-    light_control2.py의 제자리 회전 부호 규칙 적용:
+    light_control2.py의 제자리 회전 부호 규칙 적용 (2단계 감속):
     LEFT (+1): L = -speed, R = +speed
     RIGHT (-1): L = +speed, R = -speed
     """
-    speed = DIRECT_TURN_SLOW_SPEED if remaining_deg <= DIRECT_TURN_SLOW_REMAIN_DEG else DIRECT_TURN_SPEED
+    if remaining_deg <= DIRECT_TURN_FINE_REMAIN_DEG:
+        speed = DIRECT_TURN_FINE_SPEED
+    elif remaining_deg <= DIRECT_TURN_SLOW_REMAIN_DEG:
+        speed = DIRECT_TURN_SLOW_SPEED
+    else:
+        speed = DIRECT_TURN_SPEED
+
     if direction_sign > 0:
         return -speed, speed
     else:
         return speed, -speed
 
 
-def run_direct_imu_turn(command_direction, next_state, target_angle_deg=TURN_ANGLE_DEG):
-    """IMU 변화량 누적 기반 목표 각도 다이렉트 바퀴 회전"""
-    global turn_context
+def run_direct_target_yaw_turn(target_yaw, next_state, label="TURN"):
+    """절대 목표각(target_yaw) 기준 다이렉트 회전 + 관성 오버슈트 안정화/역보정"""
     now = time.monotonic()
-    yaw, stamp, seq = get_imu_snapshot()
-    if stamp is None or now - stamp > IMU_STALE_TIMEOUT_S:
-        latch_safety_fault("Cannot start/continue turn without fresh IMU")
+    yaw, stamp, _ = get_imu_snapshot()
+
+    if stamp is None or (now - stamp) > IMU_STALE_TIMEOUT_S:
+        latch_safety_fault(f"{label} 중 IMU 신호 끊김")
         return
 
-    if turn_context is None:
-        turn_context = {
-            "started": now,
-            "last_yaw": yaw,
-            "last_seq": seq,
-            "accumulated": 0.0,
-            "motion_anchor": 0.0,
-            "last_motion": now,
-            "direction": command_direction,
-            "target_angle": float(target_angle_deg),
-        }
-        print(
-            f"[DIRECT TURN START] yaw={yaw:.2f} deg, target={target_angle_deg:.1f} deg, dir={command_direction}",
-            flush=True,
-        )
-
-    ctx = turn_context
-    if ctx["direction"] != command_direction:
-        latch_safety_fault("Unexpected turn direction change")
-        return
-
-    if seq != ctx["last_seq"]:
-        delta = normalize_delta(yaw - ctx["last_yaw"])
-        if abs(delta) > IMU_MAX_STEP_DEG:
-            latch_safety_fault(f"IMU discontinuity: {delta:.1f} deg/sample")
-            return
-        ctx["accumulated"] += abs(delta)
-        ctx["last_yaw"], ctx["last_seq"] = yaw, seq
-        if abs(ctx["accumulated"] - ctx["motion_anchor"]) >= IMU_MIN_MOTION_DEG:
-            ctx["last_motion"] = now
-            ctx["motion_anchor"] = ctx["accumulated"]
-
-    remaining = max(0.0, ctx["target_angle"] - ctx["accumulated"])
-    if remaining <= TURN_TOLERANCE_DEG:
+    if state_elapsed() >= TURN_TIMEOUT_S:
         force_stop()
-        print(f"[DIRECT TURN DONE] accumulated={ctx['accumulated']:.2f} deg", flush=True)
-        reset_turn()
+        run_direct_target_yaw_turn.settle_start = None
+        print(f"[{label} 타임아웃] 목표: {target_yaw:.1f} / 현재: {yaw:.1f}", flush=True)
         transition(next_state)
         return
 
-    reason = turn_watchdog_reason(now)
-    if reason:
-        latch_safety_fault(reason)
+    diff = normalize_delta(target_yaw - yaw)
+    remaining = abs(diff)
+
+    if remaining <= TURN_TOLERANCE_DEG:
+        force_stop()
+        settle_start = getattr(run_direct_target_yaw_turn, "settle_start", None)
+        if settle_start is None:
+            run_direct_target_yaw_turn.settle_start = now
+        elif now - settle_start >= TURN_SETTLE_S:
+            print(
+                f"[{label} 완료] 목표: {target_yaw:.1f} / 현재: {yaw:.1f} / 오차: {diff:+.1f}",
+                flush=True,
+            )
+            run_direct_target_yaw_turn.settle_start = None
+            transition(next_state)
         return
 
-    left_wheel, right_wheel = compute_direct_wheel_turn(command_direction, remaining)
+    # 오차가 허용 범위를 벗어나면(관성 오버슈트 포함) 정지 타이머 초기화 후 재보정
+    run_direct_target_yaw_turn.settle_start = None
+    turn_dir = 1.0 if diff > 0 else -1.0
+    left_wheel, right_wheel = compute_direct_wheel_turn(turn_dir, remaining)
     set_direct_wheel_command(left_wheel, right_wheel)
 
 
@@ -317,6 +311,7 @@ def transition(new_state):
     global state, state_enter_time
     state = new_state
     state_enter_time = time.monotonic()
+    run_direct_target_yaw_turn.settle_start = None
     print(f"\n[FSM TRANSITION] -> {state.name}", flush=True)
 
 
@@ -532,7 +527,7 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
         force_stop()
         return
 
-    # 1. 차선 추종 및 장애물 45cm 미만 연속 2회 감지 -> 정지 및 IMU 값 저장
+    # 1. 차선 추종 및 장애물 45cm 미만 연속 2회 감지 -> 정지 및 직선 도로 기준각 적용
     if state == State.LANE_FOLLOWING:
         is_front_close = (0.0 < front_d < FRONT_STOP_CM)
 
@@ -548,12 +543,12 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
 
             yaw, stamp, _ = get_imu_snapshot()
             if stamp is None or (time.monotonic() - stamp) > IMU_STALE_TIMEOUT_S:
-                latch_safety_fault("기준 Yaw 저장 실패: IMU 응답 없음")
+                latch_safety_fault("기준 Yaw 확인 실패: IMU 응답 없음")
                 return
 
-            run_fsm.initial_yaw = yaw
+            # 직선 도로 정면 기준각(출발 시 저장)을 우선 사용
+            run_fsm.initial_yaw = track_front_yaw if track_front_yaw is not None else yaw
             run_fsm.diagonal_yaw = None
-            run_fsm.align_turn_dir = None
             run_fsm.recovery_yaw = None
 
             vision_dir = get_obstacle_direction_by_contour(frame, pair)
@@ -568,8 +563,9 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
                 avoid_direction = vision_dir
 
             print(
-                f"\n[OBSTACLE DETECTED] Front: {front_d:.1f}cm -> 정지 및 기준 각도 저장 "
-                f"(initial_yaw={yaw:.2f} deg, Avoid Dir: {avoid_direction.name})",
+                f"\n[OBSTACLE DETECTED] Front: {front_d:.1f}cm -> 정지 "
+                f"(현재 Yaw={yaw:.2f} deg / 도로 기준 Yaw={run_fsm.initial_yaw:.2f} deg, "
+                f"Avoid Dir: {avoid_direction.name})",
                 flush=True,
             )
             transition(State.AVOID_START_PAUSE)
@@ -589,18 +585,18 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
             transition(State.AVOID_TURN_OUT)
         return
 
-    # 2. IMU 센서로 90도 회전될 때까지 제자리 회전
+    # 2. 도로 정면 기준 ±90도 절대각으로 제자리 회전 (오버슈트 역보정 포함)
     if state == State.AVOID_TURN_OUT:
-        run_direct_imu_turn(avoid_direction.value, State.AVOID_PAUSE, target_angle_deg=TURN_ANGLE_DEG)
+        target_yaw = normalize_delta(run_fsm.initial_yaw + avoid_direction.value * TURN_ANGLE_DEG)
+        run_direct_target_yaw_turn(target_yaw, State.AVOID_PAUSE, label="90도 회피 회전")
         return
 
-    # 3. 관성을 없애기 위해 몇 초 정지 (전진 유지용 현재 각도 저장)
+    # 3. 관성을 없애기 위해 몇 초 정지 (45cm 전진 기준각을 ±90도 절대각으로 고정)
     if state == State.AVOID_PAUSE:
         force_stop()
         if state_elapsed() >= AVOID_PAUSE_S:
-            yaw, _, _ = get_imu_snapshot()
-            run_fsm.diagonal_yaw = yaw
-            print(f"[관성 제거 정지 완료] 45cm 전진 기준 각도 저장: {yaw:.2f} deg", flush=True)
+            run_fsm.diagonal_yaw = normalize_delta(run_fsm.initial_yaw + avoid_direction.value * TURN_ANGLE_DEG)
+            print(f"[관성 제거 정지 완료] 45cm 전진 기준 각도 설정: {run_fsm.diagonal_yaw:.2f} deg", flush=True)
             transition(State.AVOID_DIAGONAL)
         return
 
@@ -610,9 +606,8 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
 
         if state_elapsed() >= move_time:
             force_stop()
-            run_fsm.align_turn_dir = None
             reset_turn()
-            print("[45cm 전진 완료] 초기 저장 IMU 각도로 복귀 회전 시작", flush=True)
+            print("[45cm 전진 완료] 직선 도로 정면 기준각으로 정렬 회전 시작", flush=True)
             transition(State.AVOID_ALIGN)
             return
 
@@ -624,54 +619,32 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
         set_command(AVOID_SPEED, correction_angular)
         return
 
-    # 4-2. 처음 장애물 정지 시 저장된 IMU 센서값(initial_yaw)이 될 때까지 회전
+    # 4-2. 직선 도로 정면 기준각(initial_yaw = track_front_yaw)으로 정렬 회전 + 오버슈트 역보정
     if state == State.AVOID_ALIGN:
-        now = time.monotonic()
-        yaw, stamp, _ = get_imu_snapshot()
-
-        if stamp is None or (now - stamp) > IMU_STALE_TIMEOUT_S:
-            latch_safety_fault("정렬 회전 중 IMU 신호 끊김")
-            return
-
-        if state_elapsed() >= TURN_TIMEOUT_S:
-            force_stop()
-            print("[정렬 타임아웃] 관성 정지 단계로 전환", flush=True)
-            transition(State.AVOID_ALIGN_PAUSE)
-            return
-
-        target_yaw = getattr(run_fsm, "initial_yaw", yaw)
-        diff = normalize_delta(target_yaw - yaw)
-        remaining = abs(diff)
-
-        if getattr(run_fsm, "align_turn_dir", None) is None:
-            run_fsm.align_turn_dir = 1 if diff > 0 else -1
-
-        if remaining <= TURN_TOLERANCE_DEG:
-            force_stop()
-            print(f"[정렬 완료] 목표: {target_yaw:.1f} / 현재: {yaw:.1f}", flush=True)
-            transition(State.AVOID_ALIGN_PAUSE)
-            return
-
-        turn_dir = 1.0 if diff > 0 else -1.0
-        left_wheel, right_wheel = compute_direct_wheel_turn(turn_dir, remaining)
-        set_direct_wheel_command(left_wheel, right_wheel)
+        run_direct_target_yaw_turn(run_fsm.initial_yaw, State.AVOID_ALIGN_PAUSE, label="정면 정렬 회전")
         return
 
     # 5. 회전 완료 후 관성을 없애기 위해 몇 초 정지
     if state == State.AVOID_ALIGN_PAUSE:
         force_stop()
         if state_elapsed() >= ALIGN_PAUSE_S:
-            print("[관성 제거 정지 완료] 1.1m IMU 각도 유지 직진 시작", flush=True)
+            yaw, _, _ = get_imu_snapshot()
+            diff = normalize_delta(run_fsm.initial_yaw - yaw)
+            print(
+                f"[관성 제거 정지 완료] 1.1m 직진 시작 - 목표: {run_fsm.initial_yaw:.1f} / "
+                f"현재: {yaw:.1f} / 오차: {diff:+.1f}",
+                flush=True,
+            )
             transition(State.AVOID_FORWARD)
         return
 
-    # 6. 1.1m 전진 (실시간 IMU 센서값과 초기 저장 IMU 센서값 오차 계산 및 제어)
+    # 6. 1.1m 전진 (실시간 IMU 센서값과 도로 기준각 오차 계산 및 제어)
     if state == State.AVOID_FORWARD:
         pass_time = AVOID_FORWARD_DIST_M / PASS_SPEED
 
         if state_elapsed() >= pass_time:
             force_stop()
-            print("[1.1m 직진 완료] 4번 회전 방향으로 15도 복귀 회전 시작", flush=True)
+            print("[1.1m 직진 완료] 도로 중앙 복귀용 15도 회전 시작", flush=True)
             reset_turn()
             run_fsm.recovery_yaw = None
             transition(State.RECOVERY_TURN_IN)
@@ -692,12 +665,10 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
         set_command(PASS_SPEED, correction_angular)
         return
 
-    # 7-1. 도로 중앙 복귀를 위해 4번 회전 방향으로 15도 회전
+    # 7-1. 도로 중앙 복귀를 위해 도로 정면 기준 ∓15도 절대각으로 회전
     if state == State.RECOVERY_TURN_IN:
-        align_dir = getattr(run_fsm, "align_turn_dir", None)
-        if align_dir is None:
-            align_dir = -avoid_direction.value
-        run_direct_imu_turn(align_dir, State.RECOVERY_DIAGONAL, target_angle_deg=RECOVERY_TURN_ANGLE_DEG)
+        target_yaw = normalize_delta(run_fsm.initial_yaw - avoid_direction.value * RECOVERY_TURN_ANGLE_DEG)
+        run_direct_target_yaw_turn(target_yaw, State.RECOVERY_DIAGONAL, label="15도 복귀 회전")
         return
 
     # 7-2. 15도 각도로 30cm 전진
@@ -712,7 +683,9 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
 
         yaw, _, _ = get_imu_snapshot()
         if getattr(run_fsm, "recovery_yaw", None) is None:
-            run_fsm.recovery_yaw = yaw
+            run_fsm.recovery_yaw = normalize_delta(
+                run_fsm.initial_yaw - avoid_direction.value * RECOVERY_TURN_ANGLE_DEG
+            )
         diff = normalize_delta(run_fsm.recovery_yaw - yaw)
         correction_angular = max(-0.3, min(0.3, TURN_KP * diff))
         set_command(AVOID_SPEED, correction_angular)
@@ -736,7 +709,7 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
 # Main Loop
 # ============================================================
 def main():
-    global is_running, shared_frame_time, control_failure
+    global is_running, shared_frame_time, control_failure, track_front_yaw
 
     ugv_serial = ultrasonic = cap = control_thread = imu_thread = None
 
@@ -751,6 +724,19 @@ def main():
 
         ultrasonic = create_ultrasonic_reader()
         time.sleep(0.5)
+
+        # 출발 시 직선 도로 정면 기준 각도 확정 (최대 2초 대기)
+        wait_start = time.monotonic()
+        while time.monotonic() - wait_start < 2.0:
+            yaw_init, stamp_init, _ = get_imu_snapshot()
+            if stamp_init is not None and (time.monotonic() - stamp_init) <= IMU_STALE_TIMEOUT_S:
+                track_front_yaw = yaw_init
+                break
+            time.sleep(0.05)
+
+        if track_front_yaw is None:
+            raise RuntimeError("출발 기준 IMU Yaw 수신 실패")
+        print(f"[기준각 확정] 직선 도로 정면 track_front_yaw = {track_front_yaw:.2f} deg", flush=True)
 
         cap = cv2.VideoCapture(gstreamer_pipeline(flip_method=0), cv2.CAP_GSTREAMER)
 
