@@ -92,49 +92,78 @@ def calculate_pid(
     current_error,
     previous_error,
     dt,
+    filtered_derivative=0.0,
+    is_new_frame=True,
     Kp=0.003,
-    Kd=0.001,
+    Kd=0.002,
+    D_ALPHA=0.3,
 ):
     """
-    차선 오차로 조향 각속도를 계산하는 PD 제어입니다.
+    차선 오차로 조향 각속도를 계산하는 프레임 동기화 PD 제어입니다.
 
     dt:
-        새 영상 결과 사이의 실제 시간 간격(초).
+        새 카메라 프레임 사이의 실제 시간 간격(초).
 
     previous_error=None:
         시작 또는 재출발 첫 측정이므로 D항을 0으로 처리.
+
+    filtered_derivative:
+        직전까지 저역통과 필터(EMA)가 적용된 오차 변화율(px/s).
+
+    is_new_frame:
+        True일 때만 새 미분값을 계산해 필터를 갱신하고,
+        False일 때는 직전 필터링된 미분값을 유지해 50 Hz 제어 출력을 부드럽게 유지.
     """
     values = (
         current_error,
-        dt,
+        filtered_derivative,
         Kp,
         Kd,
+        D_ALPHA,
     )
 
-    if (
-        not all(math.isfinite(v) for v in values)
-        or dt <= 0
-    ):
+    if not all(math.isfinite(v) for v in values):
         raise ValueError(
-            "유효하지 않은 오차값, 시간 간격 또는 PD 계수"
+            "유효하지 않은 오차값 또는 PD 계수"
         )
 
-    if previous_error is None:
-        derivative = 0.0
+    if not (0.0 < D_ALPHA <= 1.0):
+        raise ValueError(
+            "D_ALPHA는 0 초과 1 이하의 값이어야 합니다"
+        )
 
-    else:
-        if not math.isfinite(previous_error):
-            raise ValueError(
-                "이전 오차값이 유효하지 않습니다"
-            )
+    # 프레임 동기화 + EMA 저역통과 필터 D항 계산
+    MIN_FRAME_DT = 0.005
+    MAX_FRAME_DT = 0.25
 
-        derivative = (
-            current_error - previous_error
-        ) / dt
+    if is_new_frame:
+        if previous_error is None:
+            filtered_derivative = 0.0
+        else:
+            if not math.isfinite(previous_error):
+                raise ValueError(
+                    "이전 오차값이 유효하지 않습니다"
+                )
+            if not math.isfinite(dt) or dt <= 0.0:
+                raise ValueError(
+                    "유효하지 않은 프레임 시간 간격(dt)"
+                )
 
-    # 2단계 비례 제어 (전방 주시 0.60 기준):
-    # - ±80 px 이내: Kp(0.0015)로 부드럽게 중앙 추종
-    # - ±80 px 초과: 초과분에 KP_LARGE(0.0025)를 적용해 복귀 보강
+            if MIN_FRAME_DT <= dt <= MAX_FRAME_DT:
+                raw_derivative = (
+                    current_error - previous_error
+                ) / dt
+                filtered_derivative = (
+                    (1.0 - D_ALPHA) * filtered_derivative
+                    + D_ALPHA * raw_derivative
+                )
+            else:
+                # 카메라 프레임 간격이 비정상적으로 길거나 짧으면 D항 초기화
+                filtered_derivative = 0.0
+
+    # 2단계 비례 제어:
+    # - ±80 px 이내: Kp
+    # - ±80 px 초과: 초과분에 KP_LARGE 적용
     ERROR_BOOST_THRESHOLD = 80.0
     KP_LARGE = 0.003
 
@@ -148,23 +177,21 @@ def calculate_pid(
             + KP_LARGE * (abs_err - ERROR_BOOST_THRESHOLD)
         )
 
-    angular_z = (
-        p_term
-        + Kd * derivative
-    )
+    d_term = Kd * filtered_derivative
+    angular_z = p_term + d_term
 
     if not math.isfinite(angular_z):
         raise ValueError(
             "계산한 조향값이 유효하지 않습니다"
         )
 
-    # 기존 조향 방향과 출력 상한 유지
     MAX_ANGULAR_Z = 0.5
-
-    return max(
+    angular_z = max(
         -MAX_ANGULAR_Z,
         min(MAX_ANGULAR_Z, angular_z),
     )
+
+    return angular_z, filtered_derivative
 
 
 def send_driving_command(ser, base_speed, angular_z):

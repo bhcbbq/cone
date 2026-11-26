@@ -73,6 +73,8 @@ is_running = True
 
 shared_error = 0.0
 lane_detected = False
+shared_frame_seq = 0
+shared_frame_time = 0.0
 
 # 수동 주행 시 좌/우 바퀴에 보낼 속도
 manual_left_speed = 0.0
@@ -1118,24 +1120,16 @@ def control_thread_task():
     global return_drive_start_odl
     global return_drive_start_odr
 
-    previous_error = 0.0
-
-    last_time = time.time()
+    previous_error = None
+    filtered_derivative = 0.0
+    last_frame_seq = -1
+    last_frame_time = None
 
     last_mode = None
 
     print("[알림] 모터 제어 스레드 시작")
 
     while is_running:
-
-        current_time = time.time()
-
-        dt = current_time - last_time
-
-        if dt <= 0:
-            dt = 0.001
-
-        last_time = current_time
 
         with state_lock:
 
@@ -1145,12 +1139,18 @@ def control_thread_task():
 
             detected = lane_detected
 
+            current_frame_seq = shared_frame_seq
+            current_frame_time = shared_frame_time
+
             current_manual_left = manual_left_speed
             current_manual_right = manual_right_speed
 
         if current_mode != last_mode:
 
-            previous_error = current_error
+            previous_error = current_error if detected else None
+            filtered_derivative = 0.0
+            last_frame_seq = current_frame_seq
+            last_frame_time = current_frame_time if detected else None
 
             last_mode = current_mode
 
@@ -1252,9 +1252,39 @@ def control_thread_task():
 
             if detected:
 
-                angular_z = ugv_control.calculate_pid(current_error, previous_error, dt)
+                is_new_frame = current_frame_seq != last_frame_seq
 
-                previous_error = current_error
+                if is_new_frame:
+                    if (
+                        last_frame_time is not None
+                        and current_frame_time > last_frame_time
+                    ):
+                        frame_dt = current_frame_time - last_frame_time
+                        prev_err_arg = previous_error
+                    else:
+                        frame_dt = 0.033
+                        prev_err_arg = None
+
+                    angular_z, filtered_derivative = ugv_control.calculate_pid(
+                        current_error,
+                        prev_err_arg,
+                        frame_dt,
+                        filtered_derivative=filtered_derivative,
+                        is_new_frame=True,
+                    )
+
+                    previous_error = current_error
+                    last_frame_seq = current_frame_seq
+                    last_frame_time = current_frame_time
+
+                else:
+                    angular_z, filtered_derivative = ugv_control.calculate_pid(
+                        current_error,
+                        previous_error,
+                        0.033,
+                        filtered_derivative=filtered_derivative,
+                        is_new_frame=False,
+                    )
 
                 with ugv_write_lock:
 
@@ -1263,6 +1293,11 @@ def control_thread_task():
                 lane_lost_printed = False
 
             else:
+
+                previous_error = None
+                filtered_derivative = 0.0
+                last_frame_seq = current_frame_seq
+                last_frame_time = None
 
                 with ugv_write_lock:
 
@@ -1443,11 +1478,13 @@ if __name__ == "__main__":
             # LANE DETECTION VER2
             # ========================================================
 
+            frame_time = time.monotonic()
+
             raw_edges, lane_edge_image = lane_edges(frame)
 
             pair, lane_status = lane_tracker.update(
                 lane_edge_image,
-                time.monotonic(),
+                frame_time,
                 frame=frame,
             )
 
@@ -1462,6 +1499,9 @@ if __name__ == "__main__":
                 shared_error = error
 
                 lane_detected = is_detected
+
+                shared_frame_seq += 1
+                shared_frame_time = frame_time
 
             if show_windows:
                 cv2.imshow("Smart Cone - Lane Tracking", result_image)
