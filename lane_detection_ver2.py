@@ -5,10 +5,10 @@ import numpy as np
 # 기존 ver2 설정 유지 (반응 지연 축소를 위해 SMOOTH_ALPHA만 0.35 -> 0.50 조정)
 HOLD_SECONDS = 0.20
 WIDTH_LEARN_FRAMES = 3
-SMOOTH_ALPHA = 0.40
+SMOOTH_ALPHA = 0.50
 
 # 조향 오차를 계산할 전방 주시 높이 비율 (0.55 ~ 0.65 사이에서 조정)
-LOOKAHEAD_Y_RATIO = 0.50
+LOOKAHEAD_Y_RATIO = 0.60
 
 # 한쪽 차선 후보가 받을 수 있는 최대 색상 가산점
 COLOR_BONUS = 40.0
