@@ -253,6 +253,10 @@ def hc12_thread_task():
 
     buffer = ""
 
+    
+
+
+    
     print("[알림] HC-12 명령 수신 스레드 시작")
 
     while is_running:
@@ -1143,6 +1147,12 @@ def control_thread_task():
 
     last_mode = None
 
+
+
+    turn_left_cmd = 0.0
+    turn_right_cmd = 0.0
+    TURN_RAMP_STEP = 0.01
+    
     print("[알림] 모터 제어 스레드 시작")
 
     while is_running:
@@ -1167,6 +1177,11 @@ def control_thread_task():
             filtered_derivative = 0.0
             last_frame_seq = current_frame_seq
             last_frame_time = current_frame_time if detected else None
+            
+            if current_mode == "RETURN_TURN":
+                turn_left_cmd = 0.0
+                turn_right_cmd = 0.0
+
 
             last_mode = current_mode
 
@@ -1206,18 +1221,45 @@ def control_thread_task():
                     RETURN_TURN_TARGET_DEG - return_turn_accum_deg,
                 )
 
-            # 바닥 마찰 / 전압강하 완화를 위해
-            # 완전 제자리 회전 대신 완만한 pivot turn 사용
+             # 목표 회전 속도
             if remaining_deg <= TURN_SLOW_REMAIN_DEG:
-                left_speed = -0.06
-                right_speed = 0.16
+                target_left = -0.06
+                target_right = 0.16
             else:
-                left_speed = -0.08
-                right_speed = 0.20
+                target_left = -0.08
+                target_right = 0.20
+                
+                
+            # 왼쪽 모터 ramp
+            if turn_left_cmd < target_left:
+                turn_left_cmd = min(
+                    turn_left_cmd + TURN_RAMP_STEP,
+                    target_left,
+                )
+            elif turn_left_cmd > target_left:
+                turn_left_cmd = max(
+                    turn_left_cmd - TURN_RAMP_STEP,
+                    target_left,
+                )
+
+            # 오른쪽 모터 ramp
+            if turn_right_cmd < target_right:
+                turn_right_cmd = min(
+                    turn_right_cmd + TURN_RAMP_STEP,
+                    target_right,
+                )
+            elif turn_right_cmd > target_right:
+                turn_right_cmd = max(
+                    turn_right_cmd - TURN_RAMP_STEP,
+                    target_right,
+                )
 
             send_raw_ugv(
-                '{"T":1,' f'"L":{left_speed:.3f},' f'"R":{right_speed:.3f}' "}"
-            )
+                '{"T":1,'
+                f'"L":{turn_left_cmd:.3f},'
+                f'"R":{turn_right_cmd:.3f}'
+                "}"
+)
         # ============================================================
         # RETURN_ALIGN
         #
