@@ -721,6 +721,7 @@ def ugv_receive_thread_task():
     global return_turn_last_yaw
     global return_turn_accum_deg
     global tipped_notified
+    global return_turn_direction
 
     print("[알림] UGV 수신 스레드 시작")
 
