@@ -1538,8 +1538,7 @@ const styles = StyleSheet.create({
     paddingTop:
       spacing.sm,
 
-    paddingBottom:
-      spacing.md,
+    paddingBottom: 40,
 
     borderTopWidth: 1,
 
