@@ -4,10 +4,11 @@
 #    다이렉트 좌/우 바퀴 제어({"T":1,"L":...,"R":...}) 및 IMU Yaw 누적/목표각 제어로 변경
 # 3. SerialTimeoutException(Write timeout) 발생 시 제어 스레드가 중단되지 않도록 try-except 방어 적용
 # 4. 복귀 회전 각도(RECOVERY_TURN_ANGLE_DEG) 별도 분리 및 AVOID_FORWARD 들여쓰기 오류 수정
-# 5. ugv_control.calculate_pid()의 (angular_z, filtered_derivative) 튜플 반환 및 is_new_frame 연동 수정
-# 6. AVOID_ALIGN 초기 오버슈트 저감: 전진 후 정지 대기(AVOID_DIAGONAL_PAUSE), 선형 감속,
+# 5. AVOID_ALIGN 초기 오버슈트 저감: 전진 후 정지 대기(AVOID_DIAGONAL_PAUSE), 선형 감속,
 #    목표각 통과 즉시 제동, 회전 중 차선 인식 생략(IMU 응답 속도 향상) 적용
-# 7. 프로그램 시작 시점의 직선 도로 정면 Yaw(track_front_yaw)를 확정하여 정렬 기준각(initial_yaw)으로 적용
+# 6. 프로그램 시작 시점의 직선 도로 정면 Yaw(track_fr   ont_yaw)를 확정하여 정렬 기준각(initial_yaw)으로 적용
+# 7. 라인 트레이싱(GStreamer appsink, BASE_SPEED, frame_seq/frame_time 동기화, PID 루프 및 차선 미검출 정지)을
+#    light_control2.py 방식으로 교체
 import cv2
 import time
 import threading
@@ -43,7 +44,7 @@ ALIGN_SLOWDOWN_DEG = 25.0       # 이 각도 이내부터 선형 감속
 ALIGN_TOLERANCE_DEG = 3.5       # 정렬 허용 오차 (도)
 ALIGN_SETTLE_S = 0.25           # 목표각 통과 시 관성/IMU 안정화 정지 시간(초)
 
-TURN_TIMEOUT_S = 6.0
+TURN_TIMEOUT_S = 8.0
 IMU_STALE_TIMEOUT_S = 0.35
 IMU_NO_MOTION_TIMEOUT_S = 3.0
 IMU_MIN_MOTION_DEG = 1.0
@@ -240,7 +241,7 @@ SERIAL_BAUD = 115200
 FRAME_TIMEOUT = 0.5
 MAX_CAMERA_FAILURES = 3
 
-BASE_SPEED = 0.30             # m/s (일반 차선 추종)
+BASE_SPEED = 0.25             # m/s (light_control2.py 차선 추종 속도)
 AVOID_SPEED = 0.15            # m/s (대각선 회피 속도)
 PASS_SPEED = 0.40             # m/s (직진 통과 및 복귀 대각선 속도)
 
@@ -248,7 +249,6 @@ FRONT_STOP_CM = 70.0
 SIDE_DANGER_CM = 28.0
 SIDE_CLEAR_CM = 80.0
 
-TURN_KP = 0.045               # 대각선 주행 중 Yaw 유지용 P게인
 CONTROL_PERIOD_S = 0.02
 NO_OBSTACLE = -1.0
 TERMINAL_LOG_INTERVAL_S = 1.0
@@ -287,10 +287,14 @@ class AvoidDirection(Enum):
 # ============================================================
 error_lock = threading.Lock()
 shared_error = 0.0
+shared_lane_detected = False
+shared_frame_seq = 0
+shared_frame_time = 0.0
+shared_camera_time = None
+
 shared_speed = 0.0
 shared_angular_override = None
 shared_direct_wheels = None   # (L, R) 튜플이 설정되면 {"T":1,"L":...,"R":...} 다이렉트 전송
-shared_frame_time = None
 is_running = True
 control_failure = None
 
@@ -339,7 +343,7 @@ def state_elapsed():
 
 
 # ============================================================
-# Vision & Pipeline Logic
+# Vision & Pipeline Logic (light_control2.py 방식)
 # ============================================================
 def gstreamer_pipeline(
     sensor_id=0,
@@ -364,7 +368,7 @@ def gstreamer_pipeline(
         "videoconvert ! "
         "video/x-raw, "
         "format=(string)BGR ! "
-        "appsink"
+        "appsink drop=1 max-buffers=1"
         % (
             sensor_id,
             capture_width,
@@ -377,11 +381,11 @@ def gstreamer_pipeline(
     )
 
 
-def process_lane_frame(frame, lane_tracker):
-    raw_edges, edges = lane_edges(frame)
+def process_lane_frame(frame, lane_tracker, frame_time):
+    raw_edges, lane_edge_image = lane_edges(frame)
     pair, lane_status = lane_tracker.update(
-        edges,
-        time.monotonic(),
+        lane_edge_image,
+        frame_time,
         frame=frame,
     )
     result_image, error, is_detected = draw_result(
@@ -389,7 +393,7 @@ def process_lane_frame(frame, lane_tracker):
         pair,
         lane_status,
     )
-    return error, result_image, is_detected, pair, raw_edges, edges
+    return error, result_image, is_detected, pair, raw_edges, lane_edge_image
 
 
 def get_obstacle_direction_by_contour(frame, pair):
@@ -454,67 +458,138 @@ def read_distances(reader):
     return tuple(result)
 
 
+def send_driving_safe(ugv_serial, speed, angular_z):
+    try:
+        with ugv_write_lock:
+            ugv_control.send_driving_command(ugv_serial, speed, angular_z)
+    except Exception as serial_exc:
+        print(
+            f"[경고] UGV 주행 시리얼 전송 지연 무시: {type(serial_exc).__name__}: {serial_exc}",
+            flush=True,
+        )
+
+
 def control_thread_task(ugv_serial):
     global is_running, control_failure
-    previous_error = previous_frame_time = None
+    previous_error = None
     filtered_derivative = 0.0
-    angular_z = 0.0
+    last_frame_seq = -1
+    last_frame_time = None
+    lane_lost_printed = False
+    was_lane_tracing = False
 
-    print("[알림] 제어 스레드 시작 (시리얼 타임아웃 보호 활성화)", flush=True)
+    print("[알림] 제어 스레드 시작 (light_control2 라인 트레이싱 + 시리얼 타임아웃 보호)", flush=True)
     try:
         while is_running:
             now = time.monotonic()
 
             with error_lock:
-                c_err = shared_error
+                current_error = shared_error
+                detected = shared_lane_detected
+                current_frame_seq = shared_frame_seq
+                current_frame_time = shared_frame_time
+                cam_time = shared_camera_time
+
                 c_spd = shared_speed
                 override = shared_angular_override
                 direct_wheels = shared_direct_wheels
-                f_time = shared_frame_time
 
-            stale = (f_time is None or now - f_time > FRAME_TIMEOUT)
+            stale = (cam_time is None or now - cam_time > FRAME_TIMEOUT)
 
             reason = turn_watchdog_reason(now)
             if reason:
                 latch_safety_fault(reason)
 
-            if safety_fault is not None or stale:
-                previous_error = previous_frame_time = None
+            in_lane_tracing = (
+                safety_fault is None
+                and not stale
+                and direct_wheels is None
+                and override is None
+                and c_spd > 0.0
+            )
+
+            # light_control2.py의 모드 전환 시 PID 상태 초기화와 동일한 처리
+            if in_lane_tracing and not was_lane_tracing:
+                previous_error = current_error if detected else None
                 filtered_derivative = 0.0
+                last_frame_seq = current_frame_seq
+                last_frame_time = current_frame_time if detected else None
+                lane_lost_printed = False
+            was_lane_tracing = in_lane_tracing
+
+            if safety_fault is not None or stale:
+                previous_error = None
+                filtered_derivative = 0.0
+                last_frame_time = None
                 send_raw_ugv(ugv_serial, '{"T":1,"L":0.0,"R":0.0}')
             elif direct_wheels is not None:
                 # light_control2 방식 다이렉트 바퀴 속도 전송
-                previous_error = previous_frame_time = None
+                previous_error = None
                 filtered_derivative = 0.0
+                last_frame_time = None
                 l_spd, r_spd = direct_wheels
                 send_raw_ugv(ugv_serial, f'{{"T":1,"L":{l_spd:.3f},"R":{r_spd:.3f}}}')
+            elif override is not None:
+                previous_error = None
+                filtered_derivative = 0.0
+                last_frame_time = None
+                send_driving_safe(ugv_serial, c_spd, override)
+            elif c_spd <= 0.0:
+                previous_error = None
+                filtered_derivative = 0.0
+                last_frame_time = None
+                send_driving_safe(ugv_serial, 0.0, 0.0)
             else:
-                if override is not None:
-                    angular_z = override
-                    previous_error = previous_frame_time = None
-                    filtered_derivative = 0.0
-                elif c_spd <= 0:
-                    c_spd = angular_z = 0.0
-                    previous_error = previous_frame_time = None
-                    filtered_derivative = 0.0
-                else:
-                    is_new_frame = (previous_frame_time is None or f_time != previous_frame_time)
-                    dt = (f_time - previous_frame_time) if previous_frame_time is not None else 1.0
-                    angular_z, filtered_derivative = ugv_control.calculate_pid(
-                        c_err,
-                        previous_error,
-                        dt,
-                        filtered_derivative=filtered_derivative,
-                        is_new_frame=is_new_frame,
-                    )
-                    if is_new_frame:
-                        previous_error, previous_frame_time = c_err, f_time
+                # ====================================================
+                # light_control2.py 라인 트레이싱 (DRIVE) 제어 로직
+                # ====================================================
+                if detected:
+                    is_new_frame = current_frame_seq != last_frame_seq
 
-                try:
-                    with ugv_write_lock:
-                        ugv_control.send_driving_command(ugv_serial, c_spd, angular_z)
-                except Exception as serial_exc:
-                    print(f"[경고] UGV 주행 시리얼 전송 지연 무시: {type(serial_exc).__name__}: {serial_exc}", flush=True)
+                    if is_new_frame:
+                        if (
+                            last_frame_time is not None
+                            and current_frame_time > last_frame_time
+                        ):
+                            frame_dt = current_frame_time - last_frame_time
+                            prev_err_arg = previous_error
+                        else:
+                            frame_dt = 0.033
+                            prev_err_arg = None
+
+                        angular_z, filtered_derivative = ugv_control.calculate_pid(
+                            current_error,
+                            prev_err_arg,
+                            frame_dt,
+                            filtered_derivative=filtered_derivative,
+                            is_new_frame=True,
+                        )
+
+                        previous_error = current_error
+                        last_frame_seq = current_frame_seq
+                        last_frame_time = current_frame_time
+                    else:
+                        angular_z, filtered_derivative = ugv_control.calculate_pid(
+                            current_error,
+                            previous_error,
+                            0.033,
+                            filtered_derivative=filtered_derivative,
+                            is_new_frame=False,
+                        )
+
+                    send_driving_safe(ugv_serial, c_spd, angular_z)
+                    lane_lost_printed = False
+                else:
+                    previous_error = None
+                    filtered_derivative = 0.0
+                    last_frame_seq = current_frame_seq
+                    last_frame_time = None
+
+                    send_driving_safe(ugv_serial, 0.0, 0.0)
+
+                    if not lane_lost_printed:
+                        print("[안전정지] 차선을 찾지 못했습니다.", flush=True)
+                        lane_lost_printed = True
 
             time.sleep(CONTROL_PERIOD_S)
     except Exception as exc:
@@ -579,10 +654,9 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
             transition(State.AVOID_START_PAUSE)
             return
 
-        elif not is_detected:
-            force_stop()
         elif front_obstacle_count == 0:
-            set_command(BASE_SPEED, None, error=error)
+            # 차선 검출/미검출 정지 및 PID는 control_thread_task에서 light_control2 방식으로 처리
+            set_command(BASE_SPEED, None)
         return
 
     # 1-1. 장애물 발견 직후 완전 정지 (출발 시 저장한 기준 Yaw 적용)
@@ -607,17 +681,14 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
         run_direct_imu_turn(avoid_direction.value, State.AVOID_PAUSE)
         return
 
-    # 2-1. 회전 후 잠시 대기 (대각선 유지용 각도 기억)
+    # 2-1. 회전 후 잠시 대기
     if state == State.AVOID_PAUSE:
         force_stop()
         if state_elapsed() >= 0.3:
-            yaw, _, _ = get_imu_snapshot()
-            run_fsm.diagonal_yaw = yaw
-            print(f"[대각선 각도 저장] diagonal_yaw = {yaw:.2f} deg", flush=True)
             transition(State.AVOID_DIAGONAL)
         return
 
-    # 3. 대각선 전진 (차선 넘음 감지 알고리즘 제거 -> 지정 시간 동안 대각선 이동)
+    # 3. 대각선 전진 (실시간 각도 보정 없이 지정 시간 동안 직진 이동)
     if state == State.AVOID_DIAGONAL:
         extra_time = 0.60 / AVOID_SPEED
 
@@ -627,14 +698,8 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
             transition(State.AVOID_DIAGONAL_PAUSE)
             return
 
-        # Yaw 피드백 보정으로 대각선 주행 방향 유지
-        yaw, _, _ = get_imu_snapshot()
-        target_yaw = getattr(run_fsm, 'diagonal_yaw', yaw)
-        diff = normalize_delta(target_yaw - yaw)
-        correction_angular = max(-0.3, min(0.3, TURN_KP * diff))
-        set_command(AVOID_SPEED, correction_angular)
+        set_command(AVOID_SPEED, 0.0)
         return
-
     # 3-1. 대각선 전진 직후 완전 정지 (전진 관성 제거)
     if state == State.AVOID_DIAGONAL_PAUSE:
         force_stop()
@@ -744,7 +809,8 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
 # Main Loop
 # ============================================================
 def main():
-    global is_running, shared_frame_time, control_failure, track_front_yaw
+    global is_running, control_failure, track_front_yaw
+    global shared_error, shared_lane_detected, shared_frame_seq, shared_frame_time, shared_camera_time
 
     ugv_serial = ultrasonic = cap = control_thread = imu_thread = None
 
@@ -792,7 +858,6 @@ def main():
         report_time = time.monotonic()
 
         while is_running and cap.isOpened():
-            frame_started = time.monotonic()
             ret, frame = cap.read()
 
             if not ret or frame is None or frame.size == 0:
@@ -804,10 +869,13 @@ def main():
                 continue
 
             failure_count = 0
+            frame_time = time.monotonic()
 
             need_lane = state in (State.LANE_FOLLOWING, State.RECOVERY_DIAGONAL)
             if need_lane:
-                error, result_image, is_detected, pair, raw_edges, lane_edges_img = process_lane_frame(frame, lane_tracker)
+                error, result_image, is_detected, pair, raw_edges, lane_edges_img = process_lane_frame(
+                    frame, lane_tracker, frame_time
+                )
             else:
                 error, is_detected, pair = 0.0, False, None
                 result_image = frame
@@ -818,7 +886,12 @@ def main():
             with error_lock:
                 if not is_running:
                     break
-                shared_frame_time = frame_started
+                shared_camera_time = frame_time
+                if need_lane:
+                    shared_error = error
+                    shared_lane_detected = is_detected
+                    shared_frame_seq += 1
+                    shared_frame_time = frame_time
 
             run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d)
 
