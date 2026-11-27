@@ -26,7 +26,7 @@ MANUAL_SPEED_MAX = 0.50
 MANUAL_INNER_RATIO = 0.50
 
 # 복귀 제자리 180도 회전 속도
-TURN_SPEED = 0.25
+TURN_SPEED = 0.4
 
 # 목표각에 가까워졌을 때 감속
 TURN_SLOW_SPEED = 0.18
