@@ -44,7 +44,7 @@ ALIGN_SLOWDOWN_DEG = 25.0       # 이 각도 이내부터 선형 감속
 ALIGN_TOLERANCE_DEG = 3.5       # 정렬 허용 오차 (도)
 ALIGN_SETTLE_S = 0.25           # 목표각 통과 시 관성/IMU 안정화 정지 시간(초)
 
-TURN_TIMEOUT_S = 6.0
+TURN_TIMEOUT_S = 8.0
 IMU_STALE_TIMEOUT_S = 0.35
 IMU_NO_MOTION_TIMEOUT_S = 3.0
 IMU_MIN_MOTION_DEG = 1.0
