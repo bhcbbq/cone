@@ -95,7 +95,7 @@ def calculate_pid(
     filtered_derivative=0.0,
     is_new_frame=True,
     Kp=0.003,
-    Kd=0.002,
+    Kd=0.004,
     D_ALPHA=0.3,
 ):
     """
