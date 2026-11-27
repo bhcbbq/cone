@@ -25,7 +25,7 @@ import json
 # ============================================================
 IMU_YAW_UNIT = "rad"
 TURN_ANGLE_DEG = 16.0           # 회피 회전 목표 각도 (도)
-RECOVERY_TURN_ANGLE_DEG = 25.0  # 복귀 회전 목표 각도 (도) - 원하는 각도로 조절
+RECOVERY_TURN_ANGLE_DEG = 8.0  # 복귀 회전 목표 각도 (도) - 원하는 각도로 조절
 TURN_TOLERANCE_DEG = 2.0        # 허용 오차 (도)
 
 # light_control2.py 스타일의 다이렉트 바퀴 속도 (L, R 직접 인가)
