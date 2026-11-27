@@ -7,6 +7,7 @@
 # 5. ugv_control.calculate_pid()의 (angular_z, filtered_derivative) 튜플 반환 및 is_new_frame 연동 수정
 # 6. AVOID_ALIGN 초기 오버슈트 저감: 전진 후 정지 대기(AVOID_DIAGONAL_PAUSE), 선형 감속,
 #    목표각 통과 즉시 제동, 회전 중 차선 인식 생략(IMU 응답 속도 향상) 적용
+# 7. 프로그램 시작 시점의 직선 도로 정면 Yaw(track_front_yaw)를 확정하여 정렬 기준각(initial_yaw)으로 적용
 import cv2
 import time
 import threading
@@ -26,7 +27,7 @@ import json
 # IMU & Direct Wheel Turn Settings (light_control2 방식 반영)
 # ============================================================
 IMU_YAW_UNIT = "rad"
-TURN_ANGLE_DEG = 16.0           # 회피 회전 목표 각도 (도)
+TURN_ANGLE_DEG = 20.0           # 회피 회전 목표 각도 (도)
 RECOVERY_TURN_ANGLE_DEG = 8.0   # 복귀 회전 목표 각도 (도) - 원하는 각도로 조절
 TURN_TOLERANCE_DEG = 2.0        # 허용 오차 (도)
 
@@ -57,6 +58,7 @@ shared_yaw_seq = 0
 imu_read_error = None
 turn_context = None
 safety_fault = None
+track_front_yaw = None          # 출발 시 저장되는 직선 도로 정면 기준각
 
 
 def normalize_delta(degrees):
@@ -583,16 +585,19 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
             set_command(BASE_SPEED, None, error=error)
         return
 
-    # 1-1. 장애물 발견 직후 완전 정지 (초기 기준 Yaw 저장)
+    # 1-1. 장애물 발견 직후 완전 정지 (출발 시 저장한 기준 Yaw 적용)
     if state == State.AVOID_START_PAUSE:
         force_stop()
         if state_elapsed() >= 0.6:
             yaw, stamp, _ = get_imu_snapshot()
             if stamp is None or (time.monotonic() - stamp) > IMU_STALE_TIMEOUT_S:
-                latch_safety_fault("기준 Yaw 저장 실패: IMU 응답 없음")
+                latch_safety_fault("기준 Yaw 확인 실패: IMU 응답 없음")
                 return
-            run_fsm.initial_yaw = yaw
-            print(f"[기준 각도 저장] initial_yaw = {yaw:.2f} deg", flush=True)
+            run_fsm.initial_yaw = track_front_yaw if track_front_yaw is not None else yaw
+            print(
+                f"[기준 각도 적용] 현재 Yaw = {yaw:.2f} deg / initial_yaw = {run_fsm.initial_yaw:.2f} deg",
+                flush=True,
+            )
             reset_turn()
             transition(State.AVOID_TURN_OUT)
         return
@@ -739,7 +744,7 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
 # Main Loop
 # ============================================================
 def main():
-    global is_running, shared_frame_time, control_failure
+    global is_running, shared_frame_time, control_failure, track_front_yaw
 
     ugv_serial = ultrasonic = cap = control_thread = imu_thread = None
 
@@ -754,6 +759,20 @@ def main():
 
         ultrasonic = create_ultrasonic_reader()
         time.sleep(0.5)
+
+        # 출발 시 직선 도로 정면 기준 각도 확정 (최대 2초 대기)
+        wait_start = time.monotonic()
+        while time.monotonic() - wait_start < 2.0:
+            yaw_init, stamp_init, _ = get_imu_snapshot()
+            if stamp_init is not None and (time.monotonic() - stamp_init) <= IMU_STALE_TIMEOUT_S:
+                track_front_yaw = yaw_init
+                break
+            time.sleep(0.05)
+
+        if track_front_yaw is None:
+            raise RuntimeError("출발 기준 IMU Yaw 수신 실패")
+        run_fsm.initial_yaw = track_front_yaw
+        print(f"[기준각 확정] 직선 도로 정면 track_front_yaw = {track_front_yaw:.2f} deg", flush=True)
 
         cap = cv2.VideoCapture(gstreamer_pipeline(flip_method=0), cv2.CAP_GSTREAMER)
 
