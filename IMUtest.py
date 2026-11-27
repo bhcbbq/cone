@@ -6,7 +6,7 @@
 # 4. 복귀 회전 각도(RECOVERY_TURN_ANGLE_DEG) 별도 분리 및 AVOID_FORWARD 들여쓰기 오류 수정
 # 5. AVOID_ALIGN 초기 오버슈트 저감: 전진 후 정지 대기(AVOID_DIAGONAL_PAUSE), 선형 감속,
 #    목표각 통과 즉시 제동, 회전 중 차선 인식 생략(IMU 응답 속도 향상) 적용
-# 6. 프로그램 시작 시점의 직선 도로 정면 Yaw(track_front_yaw)를 확정하여 정렬 기준각(initial_yaw)으로 적용
+# 6. 프로그램 시작 시점의 직선 도로 정면 Yaw(track_fr   ont_yaw)를 확정하여 정렬 기준각(initial_yaw)으로 적용
 # 7. 라인 트레이싱(GStreamer appsink, BASE_SPEED, frame_seq/frame_time 동기화, PID 루프 및 차선 미검출 정지)을
 #    light_control2.py 방식으로 교체
 import cv2
@@ -249,7 +249,6 @@ FRONT_STOP_CM = 70.0
 SIDE_DANGER_CM = 28.0
 SIDE_CLEAR_CM = 80.0
 
-TURN_KP = 0.045               # 대각선 주행 중 Yaw 유지용 P게인
 CONTROL_PERIOD_S = 0.02
 NO_OBSTACLE = -1.0
 TERMINAL_LOG_INTERVAL_S = 1.0
@@ -682,17 +681,14 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
         run_direct_imu_turn(avoid_direction.value, State.AVOID_PAUSE)
         return
 
-    # 2-1. 회전 후 잠시 대기 (대각선 유지용 각도 기억)
+    # 2-1. 회전 후 잠시 대기
     if state == State.AVOID_PAUSE:
         force_stop()
         if state_elapsed() >= 0.3:
-            yaw, _, _ = get_imu_snapshot()
-            run_fsm.diagonal_yaw = yaw
-            print(f"[대각선 각도 저장] diagonal_yaw = {yaw:.2f} deg", flush=True)
             transition(State.AVOID_DIAGONAL)
         return
 
-    # 3. 대각선 전진 (차선 넘음 감지 알고리즘 제거 -> 지정 시간 동안 대각선 이동)
+    # 3. 대각선 전진 (실시간 각도 보정 없이 지정 시간 동안 직진 이동)
     if state == State.AVOID_DIAGONAL:
         extra_time = 0.60 / AVOID_SPEED
 
@@ -702,14 +698,8 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
             transition(State.AVOID_DIAGONAL_PAUSE)
             return
 
-        # Yaw 피드백 보정으로 대각선 주행 방향 유지
-        yaw, _, _ = get_imu_snapshot()
-        target_yaw = getattr(run_fsm, 'diagonal_yaw', yaw)
-        diff = normalize_delta(target_yaw - yaw)
-        correction_angular = max(-0.3, min(0.3, TURN_KP * diff))
-        set_command(AVOID_SPEED, correction_angular)
+        set_command(AVOID_SPEED, 0.0)
         return
-
     # 3-1. 대각선 전진 직후 완전 정지 (전진 관성 제거)
     if state == State.AVOID_DIAGONAL_PAUSE:
         force_stop()
