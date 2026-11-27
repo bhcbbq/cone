@@ -24,7 +24,7 @@ import json
 # IMU & Direct Wheel Turn Settings (light_control2 방식 반영)
 # ============================================================
 IMU_YAW_UNIT = "rad"
-TURN_ANGLE_DEG = 16.0           # 회피 회전 목표 각도 (도)
+TURN_ANGLE_DEG = 20.0           # 회피 회전 목표 각도 (도)
 RECOVERY_TURN_ANGLE_DEG = 8.0  # 복귀 회전 목표 각도 (도) - 원하는 각도로 조절
 TURN_TOLERANCE_DEG = 2.0        # 허용 오차 (도)
 
