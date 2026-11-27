@@ -4,6 +4,7 @@
 #    다이렉트 좌/우 바퀴 제어({"T":1,"L":...,"R":...}) 및 IMU Yaw 누적/목표각 제어로 변경
 # 3. SerialTimeoutException(Write timeout) 발생 시 제어 스레드가 중단되지 않도록 try-except 방어 적용
 # 4. 복귀 회전 각도(RECOVERY_TURN_ANGLE_DEG) 별도 분리 및 AVOID_FORWARD 들여쓰기 오류 수정
+# 5. ugv_control.calculate_pid()의 (angular_z, filtered_derivative) 튜플 반환 및 is_new_frame 연동 수정
 import cv2
 import time
 import threading
@@ -430,6 +431,7 @@ def read_distances(reader):
 def control_thread_task(ugv_serial):
     global is_running, control_failure
     previous_error = previous_frame_time = None
+    filtered_derivative = 0.0
     angular_z = 0.0
 
     print("[알림] 제어 스레드 시작 (시리얼 타임아웃 보호 활성화)", flush=True)
@@ -452,23 +454,35 @@ def control_thread_task(ugv_serial):
 
             if safety_fault is not None or stale:
                 previous_error = previous_frame_time = None
+                filtered_derivative = 0.0
                 send_raw_ugv(ugv_serial, '{"T":1,"L":0.0,"R":0.0}')
             elif direct_wheels is not None:
                 # light_control2 방식 다이렉트 바퀴 속도 전송
                 previous_error = previous_frame_time = None
+                filtered_derivative = 0.0
                 l_spd, r_spd = direct_wheels
                 send_raw_ugv(ugv_serial, f'{{"T":1,"L":{l_spd:.3f},"R":{r_spd:.3f}}}')
             else:
                 if override is not None:
                     angular_z = override
                     previous_error = previous_frame_time = None
+                    filtered_derivative = 0.0
                 elif c_spd <= 0:
                     c_spd = angular_z = 0.0
                     previous_error = previous_frame_time = None
-                elif previous_frame_time is None or f_time != previous_frame_time:
-                    dt = (f_time - previous_frame_time) if previous_frame_time else 1.0
-                    angular_z = ugv_control.calculate_pid(c_err, previous_error, dt)
-                    previous_error, previous_frame_time = c_err, f_time
+                    filtered_derivative = 0.0
+                else:
+                    is_new_frame = (previous_frame_time is None or f_time != previous_frame_time)
+                    dt = (f_time - previous_frame_time) if previous_frame_time is not None else 1.0
+                    angular_z, filtered_derivative = ugv_control.calculate_pid(
+                        c_err,
+                        previous_error,
+                        dt,
+                        filtered_derivative=filtered_derivative,
+                        is_new_frame=is_new_frame,
+                    )
+                    if is_new_frame:
+                        previous_error, previous_frame_time = c_err, f_time
 
                 try:
                     with ugv_write_lock:
