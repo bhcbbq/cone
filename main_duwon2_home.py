@@ -1,8 +1,10 @@
-    # 최신 수정:
+# 최신 수정:
 # 1. 대각선 전진(AVOID_DIAGONAL) 시 차선 넘음 감지 알고리즘 제거 (고정 거리/시간 이동)
 # 2. 모든 제자리 회전(AVOID_TURN_OUT, AVOID_ALIGN, RECOVERY_TURN_IN)을 light_control2 방식의
-#    다이렉트 좌/우 바퀴 제어({"T":1,"L":...,"R":...}) 및 IMU Yaw 누적/목표각 제어로 변경 (25도)
+#    다이렉트 좌/우 바퀴 제어({"T":1,"L":...,"R":...}) 및 IMU Yaw 누적/목표각 제어로 변경
 # 3. SerialTimeoutException(Write timeout) 발생 시 제어 스레드가 중단되지 않도록 try-except 방어 적용
+# 4. 복귀 회전 각도(RECOVERY_TURN_ANGLE_DEG) 별도 분리 및 AVOID_FORWARD 들여쓰기 오류 수정
+# 5. ugv_control.calculate_pid()의 (angular_z, filtered_derivative) 튜플 반환 및 is_new_frame 연동 수정
 import cv2
 import time
 import threading
@@ -22,7 +24,8 @@ import json
 # IMU & Direct Wheel Turn Settings (light_control2 방식 반영)
 # ============================================================
 IMU_YAW_UNIT = "rad"
-TURN_ANGLE_DEG = 16.0           # 목표 회전 각도 (25도)
+TURN_ANGLE_DEG = 16.0           # 회피 회전 목표 각도 (도)
+RECOVERY_TURN_ANGLE_DEG = 8.0  # 복귀 회전 목표 각도 (도) - 원하는 각도로 조절
 TURN_TOLERANCE_DEG = 2.0        # 허용 오차 (도)
 
 # light_control2.py 스타일의 다이렉트 바퀴 속도 (L, R 직접 인가)
@@ -148,8 +151,8 @@ def compute_direct_wheel_turn(direction_sign, remaining_deg):
         return speed, -speed
 
 
-def run_direct_imu_turn(command_direction, next_state):
-    """IMU 변화량 누적 기반 25도 다이렉트 바퀴 회전"""
+def run_direct_imu_turn(command_direction, next_state, target_angle_deg=TURN_ANGLE_DEG):
+    """IMU 변화량 누적 기반 다이렉트 바퀴 회전"""
     global turn_context
     now = time.monotonic()
     yaw, stamp, seq = get_imu_snapshot()
@@ -167,7 +170,7 @@ def run_direct_imu_turn(command_direction, next_state):
             "last_motion": now,
             "direction": command_direction,
         }
-        print(f"[DIRECT TURN START] yaw={yaw:.2f} deg, target={TURN_ANGLE_DEG:.1f} deg, dir={command_direction}", flush=True)
+        print(f"[DIRECT TURN START] yaw={yaw:.2f} deg, target={target_angle_deg:.1f} deg, dir={command_direction}", flush=True)
 
     ctx = turn_context
     if ctx["direction"] != command_direction:
@@ -185,7 +188,7 @@ def run_direct_imu_turn(command_direction, next_state):
             ctx["last_motion"] = now
             ctx["motion_anchor"] = ctx["accumulated"]
 
-    remaining = max(0.0, TURN_ANGLE_DEG - ctx["accumulated"])
+    remaining = max(0.0, target_angle_deg - ctx["accumulated"])
     if remaining <= TURN_TOLERANCE_DEG:
         force_stop()
         print(f"[DIRECT TURN DONE] accumulated={ctx['accumulated']:.2f} deg", flush=True)
@@ -428,6 +431,7 @@ def read_distances(reader):
 def control_thread_task(ugv_serial):
     global is_running, control_failure
     previous_error = previous_frame_time = None
+    filtered_derivative = 0.0
     angular_z = 0.0
 
     print("[알림] 제어 스레드 시작 (시리얼 타임아웃 보호 활성화)", flush=True)
@@ -450,23 +454,35 @@ def control_thread_task(ugv_serial):
 
             if safety_fault is not None or stale:
                 previous_error = previous_frame_time = None
+                filtered_derivative = 0.0
                 send_raw_ugv(ugv_serial, '{"T":1,"L":0.0,"R":0.0}')
             elif direct_wheels is not None:
                 # light_control2 방식 다이렉트 바퀴 속도 전송
                 previous_error = previous_frame_time = None
+                filtered_derivative = 0.0
                 l_spd, r_spd = direct_wheels
                 send_raw_ugv(ugv_serial, f'{{"T":1,"L":{l_spd:.3f},"R":{r_spd:.3f}}}')
             else:
                 if override is not None:
                     angular_z = override
                     previous_error = previous_frame_time = None
+                    filtered_derivative = 0.0
                 elif c_spd <= 0:
                     c_spd = angular_z = 0.0
                     previous_error = previous_frame_time = None
-                elif previous_frame_time is None or f_time != previous_frame_time:
-                    dt = (f_time - previous_frame_time) if previous_frame_time else 1.0
-                    angular_z = ugv_control.calculate_pid(c_err, previous_error, dt)
-                    previous_error, previous_frame_time = c_err, f_time
+                    filtered_derivative = 0.0
+                else:
+                    is_new_frame = (previous_frame_time is None or f_time != previous_frame_time)
+                    dt = (f_time - previous_frame_time) if previous_frame_time is not None else 1.0
+                    angular_z, filtered_derivative = ugv_control.calculate_pid(
+                        c_err,
+                        previous_error,
+                        dt,
+                        filtered_derivative=filtered_derivative,
+                        is_new_frame=is_new_frame,
+                    )
+                    if is_new_frame:
+                        previous_error, previous_frame_time = c_err, f_time
 
                 try:
                     with ugv_write_lock:
@@ -557,7 +573,7 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
             transition(State.AVOID_TURN_OUT)
         return
 
-    # 2. 제자리 회전 (25도 다이렉트 바퀴 제어)
+    # 2. 제자리 회전 (TURN_ANGLE_DEG 다이렉트 바퀴 제어)
     if state == State.AVOID_TURN_OUT:
         run_direct_imu_turn(avoid_direction.value, State.AVOID_PAUSE)
         return
@@ -619,28 +635,34 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
         left_wheel, right_wheel = compute_direct_wheel_turn(turn_dir, remaining)
         set_direct_wheel_command(left_wheel, right_wheel)
         return
-# 4-1. 정렬 완료 후 잠시 대기 (관성 제어 및 안정화)
+
+    # 4-1. 정렬 완료 후 잠시 대기 (관성 제어 및 안정화)
     if state == State.AVOID_ALIGN_PAUSE:
-        force_stop() # 차체 강제 정지 유지
+        force_stop()  # 차체 강제 정지 유지
         if state_elapsed() >= 0.7:  # <--- 0.7초 딜레이 (원하는 시간으로 수정 가능)
             print("[정렬 딜레이 완료] 직진 통과 시작", flush=True)
             transition(State.AVOID_FORWARD)
         return
+
     # 5. 직진 통과
     if state == State.AVOID_FORWARD:
         set_command(PASS_SPEED, 0.0)
         min_pass_time = 1.0 / PASS_SPEED
 
-    if state_elapsed() >= min_pass_time:  # min_pass_time 대신 2.0 등 고정 시간 사용 가능
-        force_stop()
-        print("[통과] 지정 시간 직진 완료 -> 복귀 기동 시작", flush=True)
-        reset_turn()
-        transition(State.RECOVERY_TURN_IN)
+        if state_elapsed() >= min_pass_time:  # min_pass_time 대신 2.0 등 고정 시간 사용 가능
+            force_stop()
+            print("[통과] 지정 시간 직진 완료 -> 복귀 기동 시작", flush=True)
+            reset_turn()
+            transition(State.RECOVERY_TURN_IN)
         return
 
-    # 6. 복귀 기동 (25도 다이렉트 바퀴 제어)
+    # 6. 복귀 기동 (RECOVERY_TURN_ANGLE_DEG 다이렉트 바퀴 제어)
     if state == State.RECOVERY_TURN_IN:
-        run_direct_imu_turn(-avoid_direction.value, State.RECOVERY_DIAGONAL)
+        run_direct_imu_turn(
+            -avoid_direction.value,
+            State.RECOVERY_DIAGONAL,
+            target_angle_deg=RECOVERY_TURN_ANGLE_DEG,
+        )
         return
 
     if state == State.RECOVERY_DIAGONAL:

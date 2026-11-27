@@ -96,7 +96,7 @@ def calculate_pid(
     is_new_frame=True,
     Kp=0.003,
     Kd=0.004,
-    D_ALPHA=0.3,
+    D_ALPHA=0.2,
 ):
     """
     차선 오차로 조향 각속도를 계산하는 프레임 동기화 PD 제어입니다.
