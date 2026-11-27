@@ -1,0 +1,893 @@
+# Diagnostic experiment: stop after AVOID_FORWARD; no automatic recovery.
+# 최신 수정:
+# 1. 대각선 전진(AVOID_DIAGONAL) 시 차선 넘음 감지 알고리즘 제거 (고정 거리/시간 이동)
+# 2. 모든 제자리 회전(AVOID_TURN_OUT, AVOID_ALIGN, RECOVERY_TURN_IN)을 light_control2 방식의
+#    다이렉트 좌/우 바퀴 제어({"T":1,"L":...,"R":...}) 및 출발 기준 절대각(track_front_yaw) 제어로 변경
+# 3. 2단계 감속(DIRECT_TURN_FINE_SPEED) 및 목표각 도달 후 관성 오버슈트 안정화/역보정(TURN_SETTLE_S) 적용
+# 4. SerialTimeoutException(Write timeout) 발생 시 제어 스레드가 중단되지 않도록 try-except 방어 적용
+# 5. ugv_control.calculate_pid()의 (angular_z, filtered_derivative) 튜플 반환 및 is_new_frame 연동 수정
+import cv2
+import time
+import threading
+import traceback
+import math
+import numpy as np
+import os
+from enum import Enum, auto
+
+from lane_detection_ver2 import LaneTracker, lane_edges, draw_result
+import ugv_control
+from ultrasonic_reader import UltrasonicReader
+
+import json
+
+# ============================================================
+# IMU & Direct Wheel Turn Settings (light_control2 방식 반영)
+# ============================================================
+IMU_YAW_UNIT = "rad"
+TURN_ANGLE_DEG = 90.0           # 2번: 목표 회전 각도 (90도)
+RECOVERY_TURN_ANGLE_DEG = 15.0  # 7번: 복귀 진입 회전 각도 (15도)
+TURN_TOLERANCE_DEG = 2.0        # 허용 오차 (도)
+
+# light_control2.py 스타일의 다이렉트 바퀴 속도 (L, R 직접 인가)
+DIRECT_TURN_SPEED = 0.15        # 기본 제자리 회전 바퀴 속도
+DIRECT_TURN_SLOW_SPEED = 0.11   # 목표각 근접 시 1차 감속 바퀴 속도
+DIRECT_TURN_SLOW_REMAIN_DEG = 30.0
+DIRECT_TURN_FINE_SPEED = 0.095  # 목표각 직전 2차 미세 감속 바퀴 속도 (바닥 마찰로 안 돌면 0.105로 상향)
+DIRECT_TURN_FINE_REMAIN_DEG = 12.0
+TURN_SETTLE_S = 0.4             # 목표각 도달 후 관성 정지 확인 시간(초)
+
+TURN_TIMEOUT_S = 11.0
+IMU_STALE_TIMEOUT_S = 0.35
+IMU_NO_MOTION_TIMEOUT_S = 3.0
+IMU_MIN_MOTION_DEG = 1.0
+IMU_MAX_STEP_DEG = 45.0
+
+imu_lock = threading.Lock()
+ugv_write_lock = threading.Lock()
+
+shared_yaw = 0.0
+shared_yaw_time = None
+shared_yaw_seq = 0
+imu_read_error = None
+turn_context = None
+safety_fault = None
+track_front_yaw = None          # 출발 시 저장되는 직선 도로 정면 기준각
+
+
+def normalize_delta(degrees):
+    return (degrees + 180.0) % 360.0 - 180.0
+
+
+def get_imu_snapshot():
+    with imu_lock:
+        return shared_yaw, shared_yaw_time, shared_yaw_seq
+
+
+def send_raw_ugv(ugv_serial, message):
+    """light_control2.py와 동일하게 UGV에 다이렉트 JSON 명령 전송 (타임아웃 예외 방어 포함)"""
+    if ugv_serial is None:
+        return
+    if not message.endswith("\n"):
+        message += "\n"
+    try:
+        with ugv_write_lock:
+            ugv_serial.write(message.encode("utf-8"))
+            ugv_serial.flush()
+    except Exception as exc:
+        print(f"[경고] UGV 다이렉트 시리얼 전송 지연 무시: {type(exc).__name__}: {exc}", flush=True)
+
+
+def ugv_imu_read_task(ugv_serial):
+    global shared_yaw, shared_yaw_time, shared_yaw_seq, imu_read_error
+    buffer = ""
+    while is_running:
+        try:
+            waiting = ugv_serial.in_waiting
+            if waiting > 0:
+                buffer += ugv_serial.read(waiting).decode("utf-8", errors="ignore")
+                lines = buffer.split("\n")
+                buffer = lines[-1][-8192:]
+                for line in reversed(lines[:-1]):
+                    try:
+                        packet = json.loads(line.strip())
+                        if not isinstance(packet, dict):
+                            continue
+                        raw_yaw = packet.get("yaw", packet.get("y"))
+                        if raw_yaw is None:
+                            continue
+                        yaw = float(raw_yaw)
+                        if not math.isfinite(yaw):
+                            continue
+                        if IMU_YAW_UNIT == "rad":
+                            yaw = math.degrees(yaw)
+                        elif IMU_YAW_UNIT != "deg":
+                            raise ValueError("IMU_YAW_UNIT must be deg or rad")
+                        with imu_lock:
+                            shared_yaw = yaw
+                            shared_yaw_time = time.monotonic()
+                            shared_yaw_seq += 1
+                        imu_read_error = None
+                        break
+                    except (ValueError, TypeError, OverflowError):
+                        continue
+        except Exception as exc:
+            imu_read_error = f"{type(exc).__name__}: {exc}"
+        time.sleep(0.005)
+
+
+def latch_safety_fault(reason):
+    global safety_fault
+    if safety_fault is None:
+        safety_fault = reason
+        print(f"[SAFETY STOP] {reason}; fix cause and restart", flush=True)
+    force_stop()
+
+
+def reset_turn():
+    global turn_context
+    turn_context = None
+    run_direct_target_yaw_turn.settle_start = None
+
+
+def turn_watchdog_reason(now):
+    ctx = turn_context
+    if ctx is None:
+        return None
+    _, stamp, _ = get_imu_snapshot()
+    if stamp is None or now - stamp > IMU_STALE_TIMEOUT_S:
+        return "IMU feedback missing/stale"
+    if now - ctx["started"] >= TURN_TIMEOUT_S:
+        return "IMU turn timeout"
+    if now - ctx["last_motion"] >= IMU_NO_MOTION_TIMEOUT_S:
+        return "IMU yaw not changing during turn"
+    return None
+
+
+def compute_direct_wheel_turn(direction_sign, remaining_deg):
+    """
+    light_control2.py의 제자리 회전 부호 규칙 적용 (2단계 감속):
+    LEFT (+1): L = -speed, R = +speed
+    RIGHT (-1): L = +speed, R = -speed
+    """
+    if remaining_deg <= DIRECT_TURN_FINE_REMAIN_DEG:
+        speed = DIRECT_TURN_FINE_SPEED
+    elif remaining_deg <= DIRECT_TURN_SLOW_REMAIN_DEG:
+        speed = DIRECT_TURN_SLOW_SPEED
+    else:
+        speed = DIRECT_TURN_SPEED
+
+    if direction_sign > 0:
+        return -speed, speed
+    else:
+        return speed, -speed
+
+
+def run_direct_target_yaw_turn(target_yaw, next_state, label="TURN"):
+    """절대 목표각(target_yaw) 기준 다이렉트 회전 + 관성 오버슈트 안정화/역보정"""
+    now = time.monotonic()
+    yaw, stamp, _ = get_imu_snapshot()
+
+    if stamp is None or (now - stamp) > IMU_STALE_TIMEOUT_S:
+        latch_safety_fault(f"{label} 중 IMU 신호 끊김")
+        return
+
+    if state_elapsed() >= TURN_TIMEOUT_S:
+        force_stop()
+        run_direct_target_yaw_turn.settle_start = None
+        latch_safety_fault(
+            f"{label} 타임아웃: 목표={target_yaw:.1f} / 현재={yaw:.1f}; 다음 단계 금지"
+        )
+        return
+
+    diff = normalize_delta(target_yaw - yaw)
+    remaining = abs(diff)
+
+    if remaining <= TURN_TOLERANCE_DEG:
+        force_stop()
+        settle_start = getattr(run_direct_target_yaw_turn, "settle_start", None)
+        if settle_start is None:
+            run_direct_target_yaw_turn.settle_start = now
+        elif now - settle_start >= TURN_SETTLE_S:
+            print(
+                f"[{label} 완료] 목표: {target_yaw:.1f} / 현재: {yaw:.1f} / 오차: {diff:+.1f}",
+                flush=True,
+            )
+            run_direct_target_yaw_turn.settle_start = None
+            transition(next_state)
+        return
+
+    # 오차가 허용 범위를 벗어나면(관성 오버슈트 포함) 정지 타이머 초기화 후 재보정
+    run_direct_target_yaw_turn.settle_start = None
+    turn_dir = 1.0 if diff > 0 else -1.0
+    left_wheel, right_wheel = compute_direct_wheel_turn(turn_dir, remaining)
+    set_direct_wheel_command(left_wheel, right_wheel)
+
+
+# ============================================================
+# Configuration
+# ============================================================
+UGV_PORT = "/dev/ttyACM0"
+ULTRASONIC_PORT = "/dev/ttyUSB0"
+SERIAL_BAUD = 115200
+
+FRAME_TIMEOUT = 0.5
+MAX_CAMERA_FAILURES = 3
+
+BASE_SPEED = 0.30             # m/s (일반 차선 추종)
+AVOID_SPEED = 0.15            # m/s (대각선 회피 속도)
+PASS_SPEED = 0.40             # m/s (직진 통과 속도)
+
+FRONT_STOP_CM = 45.0          # 1번: 45cm 미만 감지 기준
+SIDE_DANGER_CM = 28.0
+SIDE_CLEAR_CM = 80.0
+
+AVOID_START_PAUSE_S = 0.5     # 장애물 감지 직후 정지 안정화 시간(초)
+AVOID_PAUSE_S = 1.5           # 3번: 90도 회전 후 관성 제거 정지 시간(초)
+AVOID_SIDE_DIST_M = 0.45      # 4번: 측면 회피 전진 거리 (45cm)
+ALIGN_PAUSE_S = 1.5           # 5번: 정렬 회전 후 관성 제거 정지 시간(초)
+AVOID_FORWARD_DIST_M = 1.10   # 6번: 장애물 통과 직진 거리 (1.1m)
+RECOVERY_DIST_M = 0.30        # 7번: 15도 복귀 전진 거리 (30cm)
+
+TURN_KP = 0.045               # 주행 중 Yaw 유지용 P게인
+FORWARD_YAW_KP = 0.045        # 6번: 1.1m 직진 중 초기 Yaw 유지용 P게인
+FORWARD_MAX_CORRECTION = 0.3  # 6번: 직진 중 최대 각도 보정 조향값
+CONTROL_PERIOD_S = 0.02
+NO_OBSTACLE = -1.0
+TERMINAL_LOG_INTERVAL_S = 1.0
+
+SHOW_WINDOWS = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")) and not any(
+    os.environ.get(name) for name in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY")
+)
+LANE_WINDOW = "Smart Cone - Lane Tracking"
+CANNY_WINDOW = "Smart Cone - Raw Canny | Lane ROI"
+
+
+# ============================================================
+# FSM State & Direction
+# ============================================================
+class State(Enum):
+    LANE_FOLLOWING = auto()
+    AVOID_START_PAUSE = auto()
+    AVOID_TURN_OUT = auto()
+    AVOID_PAUSE = auto()
+    AVOID_DIAGONAL = auto()
+    AVOID_ALIGN = auto()
+    AVOID_ALIGN_PAUSE = auto()
+    AVOID_FORWARD = auto()
+    RECOVERY_TURN_IN = auto()
+    RECOVERY_DIAGONAL = auto()
+    RECOVERY_WAIT_LANE = auto()
+
+
+class AvoidDirection(Enum):
+    LEFT = 1
+    RIGHT = -1
+
+
+# ============================================================
+# Shared Globals
+# ============================================================
+error_lock = threading.Lock()
+shared_error = 0.0
+shared_speed = 0.0
+shared_angular_override = None
+shared_direct_wheels = None   # (L, R) 튜플이 설정되면 {"T":1,"L":...,"R":...} 다이렉트 전송
+shared_frame_time = None
+is_running = True
+control_failure = None
+
+state = State.LANE_FOLLOWING
+state_enter_time = time.monotonic()
+avoid_direction = AvoidDirection.LEFT
+front_obstacle_count = 0
+recovery_detect_count = 0
+
+avoid_count = 0
+recovery_done_count = 0
+
+
+def set_command(speed, angular_override, error=None):
+    global shared_speed, shared_angular_override, shared_error, shared_direct_wheels
+    with error_lock:
+        shared_direct_wheels = None
+        shared_speed = float(speed)
+        shared_angular_override = None if angular_override is None else float(angular_override)
+        if error is not None:
+            shared_error = float(error)
+
+
+def set_direct_wheel_command(left_speed, right_speed):
+    """모터 드라이버에 {"T":1,"L":...,"R":...} 다이렉트 속도 전송을 지시"""
+    global shared_speed, shared_angular_override, shared_direct_wheels
+    with error_lock:
+        shared_speed = 0.0
+        shared_angular_override = 0.0
+        shared_direct_wheels = (float(left_speed), float(right_speed))
+
+
+def force_stop():
+    set_direct_wheel_command(0.0, 0.0)
+
+
+def transition(new_state):
+    global state, state_enter_time
+    now = time.monotonic()
+    old_state = state
+    elapsed = now - state_enter_time
+    state = new_state
+    state_enter_time = now
+    run_direct_target_yaw_turn.settle_start = None
+    print(
+        f"\n[FSM TRANSITION] {old_state.name} -> {state.name} "
+        f"| previous_elapsed={elapsed:.3f}s",
+        flush=True,
+    )
+
+
+def state_elapsed():
+    return time.monotonic() - state_enter_time
+
+
+# ============================================================
+# Vision & Pipeline Logic
+# ============================================================
+def gstreamer_pipeline(
+    sensor_id=0,
+    capture_width=1280,
+    capture_height=720,
+    display_width=640,
+    display_height=360,
+    framerate=30,
+    flip_method=0,
+):
+    return (
+        "nvarguscamerasrc sensor-id=%d ! "
+        "video/x-raw(memory:NVMM), "
+        "width=(int)%d, "
+        "height=(int)%d, "
+        "framerate=(fraction)%d/1 ! "
+        "nvvidconv flip-method=%d ! "
+        "video/x-raw, "
+        "width=(int)%d, "
+        "height=(int)%d, "
+        "format=(string)BGRx ! "
+        "videoconvert ! "
+        "video/x-raw, "
+        "format=(string)BGR ! "
+        "appsink"
+        % (
+            sensor_id,
+            capture_width,
+            capture_height,
+            framerate,
+            flip_method,
+            display_width,
+            display_height,
+        )
+    )
+
+
+def process_lane_frame(frame, lane_tracker):
+    raw_edges, edges = lane_edges(frame)
+    pair, lane_status = lane_tracker.update(
+        edges,
+        time.monotonic(),
+        frame=frame,
+    )
+    result_image, error, is_detected = draw_result(
+        frame.copy(),
+        pair,
+        lane_status,
+    )
+    return error, result_image, is_detected, pair, raw_edges, edges
+
+
+def get_obstacle_direction_by_contour(frame, pair):
+    if pair is None or len(pair) < 2:
+        return AvoidDirection.LEFT
+    height, width = frame.shape[:2]
+    y_eval_norm = (0.52 + 0.84) / 2.0
+    x_left = np.polyval(pair[0], y_eval_norm)
+    x_right = np.polyval(pair[1], y_eval_norm)
+    lane_center = (x_left + x_right) / 2.0
+    margin_px = int((x_right - x_left) * 0.10)
+
+    y1, y2 = int(height * 0.52), int(height * 0.84)
+    x1 = max(0, int(x_left + margin_px))
+    x2 = min(width, int(x_right - margin_px))
+
+    if x2 <= x1 or y2 <= y1:
+        return AvoidDirection.LEFT
+
+    roi = frame[y1:y2, x1:x2]
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    kernel = np.ones((5, 5), np.uint8)
+    thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+    thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    min_area = max(40, int((x2 - x1) * (y2 - y1) * 0.01))
+    valid_contours = [c for c in contours if cv2.contourArea(c) >= min_area]
+
+    if valid_contours:
+        largest_contour = max(valid_contours, key=cv2.contourArea)
+        bx, _, bw, _ = cv2.boundingRect(largest_contour)
+        if (x1 + bx + bw / 2.0) >= lane_center:
+            return AvoidDirection.LEFT
+        return AvoidDirection.RIGHT
+    return AvoidDirection.LEFT
+
+
+# ============================================================
+# Ultrasonic Reader & Control Thread
+# ============================================================
+def create_ultrasonic_reader():
+    reader = UltrasonicReader(port=ULTRASONIC_PORT, baudrate=SERIAL_BAUD)
+    if not reader.start():
+        raise RuntimeError("아두이노 초음파 센서 시리얼 연결 실패")
+    return reader
+
+
+def read_distances(reader):
+    values = reader.get_distances()
+    if not isinstance(values, (tuple, list)) or len(values) != 3:
+        raise ValueError("get_distances() 형태 오류")
+    result = []
+    for value in values:
+        try:
+            d = float(value)
+            result.append(d if math.isfinite(d) else NO_OBSTACLE)
+        except (TypeError, ValueError):
+            result.append(NO_OBSTACLE)
+    return tuple(result)
+
+
+def control_thread_task(ugv_serial):
+    global is_running, control_failure
+    previous_error = previous_frame_time = None
+    filtered_derivative = 0.0
+    angular_z = 0.0
+
+    print("[알림] 제어 스레드 시작 (시리얼 타임아웃 보호 활성화)", flush=True)
+    try:
+        while is_running:
+            now = time.monotonic()
+
+            with error_lock:
+                c_err = shared_error
+                c_spd = shared_speed
+                override = shared_angular_override
+                direct_wheels = shared_direct_wheels
+                f_time = shared_frame_time
+
+            stale = (f_time is None or now - f_time > FRAME_TIMEOUT)
+
+            # Diagnostic branch selection only; not motor acknowledgement.
+            if state == State.AVOID_FORWARD:
+                last_diag = getattr(control_thread_task, "_forward_diag_time", 0.0)
+                if now - last_diag >= 0.25:
+                    control_thread_task._forward_diag_time = now
+                    frame_age = float("inf") if f_time is None else now - f_time
+                    if safety_fault is not None or stale:
+                        mode = "STOP"
+                    elif direct_wheels is not None:
+                        mode = "DIRECT"
+                    else:
+                        mode = "DRIVE_T13"
+                    print(
+                        f"[FORWARD CTRL] elapsed={state_elapsed():.3f}s "
+                        f"mode={mode} requested_X={c_spd:.3f} "
+                        f"requested_Z={override} wheels={direct_wheels} "
+                        f"frame_age={frame_age:.3f}s fault={safety_fault}",
+                        flush=True,
+                    )
+
+            reason = turn_watchdog_reason(now)
+            if reason:
+                latch_safety_fault(reason)
+
+            if safety_fault is not None or stale:
+                previous_error = previous_frame_time = None
+                filtered_derivative = 0.0
+                send_raw_ugv(ugv_serial, '{"T":1,"L":0.0,"R":0.0}')
+            elif direct_wheels is not None:
+                # light_control2 방식 다이렉트 바퀴 속도 전송
+                previous_error = previous_frame_time = None
+                filtered_derivative = 0.0
+                l_spd, r_spd = direct_wheels
+                send_raw_ugv(ugv_serial, f'{{"T":1,"L":{l_spd:.3f},"R":{r_spd:.3f}}}')
+            else:
+                if override is not None:
+                    angular_z = override
+                    previous_error = previous_frame_time = None
+                    filtered_derivative = 0.0
+                elif c_spd <= 0:
+                    c_spd = angular_z = 0.0
+                    previous_error = previous_frame_time = None
+                    filtered_derivative = 0.0
+                else:
+                    is_new_frame = (previous_frame_time is None or f_time != previous_frame_time)
+                    dt = (f_time - previous_frame_time) if previous_frame_time is not None else 1.0
+                    angular_z, filtered_derivative = ugv_control.calculate_pid(
+                        c_err,
+                        previous_error,
+                        dt,
+                        filtered_derivative=filtered_derivative,
+                        is_new_frame=is_new_frame,
+                    )
+                    if is_new_frame:
+                        previous_error, previous_frame_time = c_err, f_time
+
+                try:
+                    with ugv_write_lock:
+                        ugv_control.send_driving_command(ugv_serial, c_spd, angular_z)
+                except Exception as serial_exc:
+                    print(f"[경고] UGV 주행 시리얼 전송 지연 무시: {type(serial_exc).__name__}: {serial_exc}", flush=True)
+
+            time.sleep(CONTROL_PERIOD_S)
+    except Exception as exc:
+        control_failure = f"{type(exc).__name__}: {exc}"
+        print(f"[에러] 제어 스레드 중단: {control_failure}", flush=True)
+        is_running = False
+    finally:
+        send_raw_ugv(ugv_serial, '{"T":1,"L":0.0,"R":0.0}')
+
+
+# ============================================================
+# FSM Logic
+# ============================================================
+def is_both_lanes_detected(is_detected, pair):
+    """카메라에 좌/우 두 차선이 모두 인식되었는지 판별"""
+    return (
+        bool(is_detected)
+        and pair is not None
+        and len(pair) >= 2
+        and pair[0] is not None
+        and pair[1] is not None
+    )
+
+
+def check_recovery_lane_detection(is_detected, pair):
+    global recovery_detect_count
+    if is_both_lanes_detected(is_detected, pair):
+        recovery_detect_count += 1
+        if recovery_detect_count >= 2:
+            recovery_detect_count = 0
+            print("[RECOVERY COMPLETE] 두 차선 인식 완료 -> LANE_FOLLOWING 복귀", flush=True)
+            transition(State.LANE_FOLLOWING)
+            return True
+    else:
+        recovery_detect_count = 0
+    return False
+
+
+def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
+    global avoid_direction, state, front_obstacle_count, avoid_count, recovery_done_count, recovery_detect_count
+    if safety_fault is not None:
+        force_stop()
+        return
+
+    # 1. 차선 추종 및 장애물 45cm 미만 연속 2회 감지 -> 정지 및 직선 도로 기준각 적용
+    if state == State.LANE_FOLLOWING:
+        is_front_close = (0.0 < front_d < FRONT_STOP_CM)
+
+        if is_front_close:
+            front_obstacle_count += 1
+            force_stop()
+        else:
+            front_obstacle_count = 0
+
+        if front_obstacle_count >= 2:
+            front_obstacle_count = avoid_count = recovery_done_count = recovery_detect_count = 0
+            force_stop()
+
+            yaw, stamp, _ = get_imu_snapshot()
+            if stamp is None or (time.monotonic() - stamp) > IMU_STALE_TIMEOUT_S:
+                latch_safety_fault("기준 Yaw 확인 실패: IMU 응답 없음")
+                return
+
+            # 직선 도로 정면 기준각(출발 시 저장)을 우선 사용
+            run_fsm.initial_yaw = track_front_yaw if track_front_yaw is not None else yaw
+            run_fsm.diagonal_yaw = None
+            run_fsm.recovery_yaw = None
+
+            vision_dir = get_obstacle_direction_by_contour(frame, pair)
+            if 25.0 < left_d and 25.0 < right_d:
+                if left_d > right_d + 15.0:
+                    avoid_direction = AvoidDirection.LEFT
+                elif right_d > left_d + 15.0:
+                    avoid_direction = AvoidDirection.RIGHT
+                else:
+                    avoid_direction = vision_dir
+            else:
+                avoid_direction = vision_dir
+
+            print(
+                f"\n[OBSTACLE DETECTED] Front: {front_d:.1f}cm -> 정지 "
+                f"(현재 Yaw={yaw:.2f} deg / 도로 기준 Yaw={run_fsm.initial_yaw:.2f} deg, "
+                f"Avoid Dir: {avoid_direction.name})",
+                flush=True,
+            )
+            transition(State.AVOID_START_PAUSE)
+            return
+
+        elif not is_detected:
+            force_stop()
+        elif front_obstacle_count == 0:
+            set_command(BASE_SPEED, None, error=error)
+        return
+
+    # 1-1. 장애물 감지 직후 완전 정지 안정화 대기
+    if state == State.AVOID_START_PAUSE:
+        force_stop()
+        if state_elapsed() >= AVOID_START_PAUSE_S:
+            reset_turn()
+            transition(State.AVOID_TURN_OUT)
+        return
+
+    # 2. 도로 정면 기준 ±90도 절대각으로 제자리 회전 (오버슈트 역보정 포함)
+    if state == State.AVOID_TURN_OUT:
+        target_yaw = normalize_delta(run_fsm.initial_yaw + avoid_direction.value * TURN_ANGLE_DEG)
+        run_direct_target_yaw_turn(target_yaw, State.AVOID_PAUSE, label="90도 회피 회전")
+        return
+
+    # 3. 관성을 없애기 위해 몇 초 정지 (45cm 전진 기준각을 ±90도 절대각으로 고정)
+    if state == State.AVOID_PAUSE:
+        force_stop()
+        if state_elapsed() >= AVOID_PAUSE_S:
+            run_fsm.diagonal_yaw = normalize_delta(run_fsm.initial_yaw + avoid_direction.value * TURN_ANGLE_DEG)
+            print(f"[관성 제거 정지 완료] 45cm 전진 기준 각도 설정: {run_fsm.diagonal_yaw:.2f} deg", flush=True)
+            transition(State.AVOID_DIAGONAL)
+        return
+
+    # 4-1. 45cm 전진
+    if state == State.AVOID_DIAGONAL:
+        move_time = AVOID_SIDE_DIST_M / AVOID_SPEED
+
+        if state_elapsed() >= move_time:
+            force_stop()
+            reset_turn()
+            print("[45cm 전진 완료] 직선 도로 정면 기준각으로 정렬 회전 시작", flush=True)
+            transition(State.AVOID_ALIGN)
+            return
+
+        # 45cm 전진 중 방향 유지
+        yaw, _, _ = get_imu_snapshot()
+        target_yaw = getattr(run_fsm, "diagonal_yaw", yaw)
+        diff = normalize_delta(target_yaw - yaw)
+        correction_angular = max(-0.3, min(0.3, TURN_KP * diff))
+        set_command(AVOID_SPEED, correction_angular)
+        return
+
+    # 4-2. 직선 도로 정면 기준각(initial_yaw = track_front_yaw)으로 정렬 회전 + 오버슈트 역보정
+    if state == State.AVOID_ALIGN:
+        run_direct_target_yaw_turn(run_fsm.initial_yaw, State.AVOID_ALIGN_PAUSE, label="정면 정렬 회전")
+        return
+
+    # 5. 회전 완료 후 관성을 없애기 위해 몇 초 정지
+    if state == State.AVOID_ALIGN_PAUSE:
+        force_stop()
+        if state_elapsed() >= ALIGN_PAUSE_S:
+            yaw, _, _ = get_imu_snapshot()
+            diff = normalize_delta(run_fsm.initial_yaw - yaw)
+            print(
+                f"[관성 제거 정지 완료] 1.1m 직진 시작 - 목표: {run_fsm.initial_yaw:.1f} / "
+                f"현재: {yaw:.1f} / 오차: {diff:+.1f}",
+                flush=True,
+            )
+            transition(State.AVOID_FORWARD)
+        return
+
+    # 6. 1.1m 전진 (실시간 IMU 센서값과 도로 기준각 오차 계산 및 제어)
+    if state == State.AVOID_FORWARD:
+        pass_time = AVOID_FORWARD_DIST_M / PASS_SPEED
+
+        if state_elapsed() >= pass_time:
+            force_stop()
+            reset_turn()
+            latch_safety_fault(
+                f"6번 진단 종료: 설정 시간 {pass_time:.2f}초 경과. "
+                "실제 1.1m 이동은 미확인. 7번 자동 진입 차단; 재시작 전 현장 확인"
+            )
+            return
+
+        now = time.monotonic()
+        yaw, stamp, _ = get_imu_snapshot()
+        if stamp is None or (now - stamp) > IMU_STALE_TIMEOUT_S:
+            latch_safety_fault("1.1m 직진 중 IMU 신호 끊김")
+            return
+
+        target_yaw = getattr(run_fsm, "initial_yaw", yaw)
+        yaw_error = normalize_delta(target_yaw - yaw)
+        correction_angular = max(
+            -FORWARD_MAX_CORRECTION,
+            min(FORWARD_MAX_CORRECTION, FORWARD_YAW_KP * yaw_error),
+        )
+        last_diag = getattr(run_fsm, "_forward_diag_time", 0.0)
+        if now - last_diag >= 0.25:
+            run_fsm._forward_diag_time = now
+            print(
+                f"[FORWARD YAW] elapsed={state_elapsed():.3f}s "
+                f"target={target_yaw:.2f} yaw={yaw:.2f} "
+                f"yaw_error={yaw_error:+.2f} "
+                f"X={PASS_SPEED:.3f} Z={correction_angular:+.3f} "
+                f"imu_age={now - stamp:.3f}s",
+                flush=True,
+            )
+        set_command(PASS_SPEED, correction_angular)
+        return
+
+    # 7-1. 도로 중앙 복귀를 위해 도로 정면 기준 ∓15도 절대각으로 회전
+    if state == State.RECOVERY_TURN_IN:
+        target_yaw = normalize_delta(run_fsm.initial_yaw - avoid_direction.value * RECOVERY_TURN_ANGLE_DEG)
+        run_direct_target_yaw_turn(target_yaw, State.RECOVERY_DIAGONAL, label="15도 복귀 회전")
+        return
+
+    # 7-2. 15도 각도로 30cm 전진
+    if state == State.RECOVERY_DIAGONAL:
+        recovery_time = RECOVERY_DIST_M / AVOID_SPEED
+
+        if state_elapsed() >= recovery_time:
+            recovery_detect_count = 0
+            print("[30cm 복귀 전진 완료] 두 차선 인식 대기 시작", flush=True)
+            transition(State.RECOVERY_WAIT_LANE)
+            return
+
+        yaw, _, _ = get_imu_snapshot()
+        if getattr(run_fsm, "recovery_yaw", None) is None:
+            run_fsm.recovery_yaw = normalize_delta(
+                run_fsm.initial_yaw - avoid_direction.value * RECOVERY_TURN_ANGLE_DEG
+            )
+        diff = normalize_delta(run_fsm.recovery_yaw - yaw)
+        correction_angular = max(-0.3, min(0.3, TURN_KP * diff))
+        set_command(AVOID_SPEED, correction_angular)
+        return
+
+    # 8. 카메라에 두 차선이 인식되면 라인 트레이싱 시작
+    if state == State.RECOVERY_WAIT_LANE:
+        if check_recovery_lane_detection(is_detected, pair):
+            return
+
+        set_command(AVOID_SPEED, 0.0)
+
+        if state_elapsed() >= 6.0:
+            force_stop()
+            print("[에러] 타임아웃: 두 차선을 찾지 못해 차선 추종 모드로 전환합니다.", flush=True)
+            transition(State.LANE_FOLLOWING)
+        return
+
+
+# ============================================================
+# Main Loop
+# ============================================================
+def main():
+    global is_running, shared_frame_time, control_failure, track_front_yaw
+
+    ugv_serial = ultrasonic = cap = control_thread = imu_thread = None
+
+    try:
+        print(
+            "[TEST MODE] 6번 시간 종료 후 안전정지 / 7번 자동 진입 금지 / "
+            "회전 타임아웃 시 안전정지. Ctrl+C로 종료.",
+            flush=True,
+        )
+        ugv_serial = ugv_control.init_ugv(port=UGV_PORT, baudrate=SERIAL_BAUD)
+        send_raw_ugv(ugv_serial, '{"T":1,"L":0.0,"R":0.0}')
+
+        ugv_serial.write(b'{"T":131, "cmd":1}\n')
+
+        imu_thread = threading.Thread(target=ugv_imu_read_task, args=(ugv_serial,), daemon=True)
+        imu_thread.start()
+
+        ultrasonic = create_ultrasonic_reader()
+        time.sleep(0.5)
+
+        # 출발 시 직선 도로 정면 기준 각도 확정 (최대 2초 대기)
+        wait_start = time.monotonic()
+        while time.monotonic() - wait_start < 2.0:
+            yaw_init, stamp_init, _ = get_imu_snapshot()
+            if stamp_init is not None and (time.monotonic() - stamp_init) <= IMU_STALE_TIMEOUT_S:
+                track_front_yaw = yaw_init
+                break
+            time.sleep(0.05)
+
+        if track_front_yaw is None:
+            raise RuntimeError("출발 기준 IMU Yaw 수신 실패")
+        print(f"[기준각 확정] 직선 도로 정면 track_front_yaw = {track_front_yaw:.2f} deg", flush=True)
+
+        cap = cv2.VideoCapture(gstreamer_pipeline(flip_method=0), cv2.CAP_GSTREAMER)
+
+        if SHOW_WINDOWS:
+            cv2.namedWindow(LANE_WINDOW, cv2.WINDOW_NORMAL)
+            cv2.namedWindow(CANNY_WINDOW, cv2.WINDOW_NORMAL)
+            print("[화면] 차선 인식과 Canny 표시. Q 또는 Esc로 종료.")
+        else:
+            print("[화면] SSH 또는 디스플레이 없는 환경: 화면 출력 끔.")
+
+        control_thread = threading.Thread(target=control_thread_task, args=(ugv_serial,), daemon=True)
+        control_thread.start()
+
+        lane_tracker = LaneTracker()
+
+        failure_count = 0
+        report_time = time.monotonic()
+
+        while is_running and cap.isOpened():
+            frame_started = time.monotonic()
+            ret, frame = cap.read()
+
+            if not ret or frame is None or frame.size == 0:
+                force_stop()
+                failure_count += 1
+                if failure_count >= MAX_CAMERA_FAILURES:
+                    break
+                time.sleep(0.05)
+                continue
+
+            failure_count = 0
+
+            error, result_image, is_detected, pair, raw_edges, lane_edges_img = process_lane_frame(frame, lane_tracker)
+            left_d, front_d, right_d = read_distances(ultrasonic)
+
+            with error_lock:
+                if not is_running:
+                    break
+                shared_frame_time = frame_started
+
+            run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d)
+
+            now = time.monotonic()
+            if now - report_time >= TERMINAL_LOG_INTERVAL_S:
+                print(
+                    f"[MONITOR] State: {state.name:<18} | US Front: {front_d:5.1f}cm | "
+                    f"US Side: {left_d:5.1f} / {right_d:5.1f} | Yaw: {shared_yaw:5.1f} | Error: {error:+.1f}",
+                    flush=True,
+                )
+                report_time = now
+
+            if SHOW_WINDOWS:
+                canny_view = np.hstack((raw_edges, lane_edges_img))
+                cv2.imshow(LANE_WINDOW, result_image)
+                cv2.imshow(CANNY_WINDOW, canny_view)
+
+                key = cv2.waitKey(1) & 0xFF
+                if key in (ord("q"), ord("Q"), 27):
+                    break
+
+        if control_failure:
+            print(f"제어 오류: {control_failure}")
+
+    except KeyboardInterrupt:
+        print("\n[STOP] Keyboard Interrupt detected.")
+    except Exception:
+        traceback.print_exc()
+
+    finally:
+        is_running = False
+        print("[종료] 백그라운드 제어 중지 및 모터 강제 정지 중...")
+
+        if control_thread is not None:
+            control_thread.join(timeout=1.0)
+
+        if imu_thread is not None:
+            imu_thread.join(timeout=1.0)
+
+        if ugv_serial is not None:
+            for _ in range(3):
+                send_raw_ugv(ugv_serial, '{"T":1,"L":0.0,"R":0.0}')
+                time.sleep(0.05)
+            ugv_control.stop_ugv(ugv_serial)
+
+        if ultrasonic is not None:
+            ultrasonic.stop()
+        if cap is not None:
+            cap.release()
+        if SHOW_WINDOWS:
+            cv2.destroyAllWindows()
+
+
+if __name__ == "__main__":
+    main()
