@@ -22,7 +22,7 @@ LANE_X_MIN_RATIO = -0.50
 LANE_X_MAX_RATIO = 1.50
 # 양쪽 차선 간격의 최소/최대 허용값 (화면 폭 비율, 검정 도로 실측 폭 ~1.34 기준)
 MIN_LANE_WIDTH_RATIO = 0.70
-MAX_LANE_WIDTH_RATIO = 2.00
+MAX_LANE_WIDTH_RATIO = 2.50
 # 학습된 차선 폭(self.lane_width) 대비 허용 오차 비율 (±25%)
 LEARNED_WIDTH_TOLERANCE = 0.25
 
