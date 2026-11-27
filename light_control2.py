@@ -253,10 +253,6 @@ def hc12_thread_task():
 
     buffer = ""
 
-    
-
-
-    
     print("[알림] HC-12 명령 수신 스레드 시작")
 
     while is_running:
@@ -1147,12 +1143,10 @@ def control_thread_task():
 
     last_mode = None
 
-
-
     turn_left_cmd = 0.0
     turn_right_cmd = 0.0
     TURN_RAMP_STEP = 0.01
-    
+
     print("[알림] 모터 제어 스레드 시작")
 
     while is_running:
@@ -1177,11 +1171,10 @@ def control_thread_task():
             filtered_derivative = 0.0
             last_frame_seq = current_frame_seq
             last_frame_time = current_frame_time if detected else None
-            
+
             if current_mode == "RETURN_TURN":
                 turn_left_cmd = 0.0
                 turn_right_cmd = 0.0
-
 
             last_mode = current_mode
 
@@ -1221,15 +1214,14 @@ def control_thread_task():
                     RETURN_TURN_TARGET_DEG - return_turn_accum_deg,
                 )
 
-             # 목표 회전 속도
+            # 목표 회전 속도
             if remaining_deg <= TURN_SLOW_REMAIN_DEG:
-                target_left = -0.06
-                target_right = 0.16
+                target_left = -0.04
+                target_right = 0.10
             else:
                 target_left = -0.08
                 target_right = 0.20
-                
-                
+
             # 왼쪽 모터 ramp
             if turn_left_cmd < target_left:
                 turn_left_cmd = min(
@@ -1255,11 +1247,8 @@ def control_thread_task():
                 )
 
             send_raw_ugv(
-                '{"T":1,'
-                f'"L":{turn_left_cmd:.3f},'
-                f'"R":{turn_right_cmd:.3f}'
-                "}"
-)
+                '{"T":1,' f'"L":{turn_left_cmd:.3f},' f'"R":{turn_right_cmd:.3f}' "}"
+            )
         # ============================================================
         # RETURN_ALIGN
         #
