@@ -1200,19 +1200,24 @@ def control_thread_task():
 
         elif current_mode == "RETURN_TURN":
 
-            # 기존과 같은 회전 방향을 유지하되, 목표각 근처에서는 감속
             with state_lock:
                 remaining_deg = max(
                     0.0,
                     RETURN_TURN_TARGET_DEG - return_turn_accum_deg,
                 )
 
-            turn_speed = (
-                TURN_SLOW_SPEED if remaining_deg <= TURN_SLOW_REMAIN_DEG else TURN_SPEED
+            # 바닥 마찰 / 전압강하 완화를 위해
+            # 완전 제자리 회전 대신 완만한 pivot turn 사용
+            if remaining_deg <= TURN_SLOW_REMAIN_DEG:
+                left_speed = -0.06
+                right_speed = 0.16
+            else:
+                left_speed = -0.08
+                right_speed = 0.20
+
+            send_raw_ugv(
+                '{"T":1,' f'"L":{left_speed:.3f},' f'"R":{right_speed:.3f}' "}"
             )
-
-            send_raw_ugv('{"T":1,' f'"L":{-turn_speed},' f'"R":{turn_speed}' "}")
-
         # ============================================================
         # RETURN_ALIGN
         #
