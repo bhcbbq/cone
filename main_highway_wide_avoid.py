@@ -1,443 +1,218 @@
-# main_highway_contour_avoid_final_hybrid_optimized.py
-import cv2
-import time
-import threading
-import traceback
+"""Standalone UGV T:13 Z sign test. Requires pyserial.
+Stop other UGV programs before running. X is always zero.
+Default: Z=+0.20 / -0.20, 1 second each, separately armed by Enter.
+No camera, lane tracking, or automatic obstacle avoidance.
+Software stop cannot guarantee safety if communication fails.
+"""
+import argparse
+import json
 import math
-import numpy as np
-import os
-from enum import Enum, auto
+import threading
+import time
 
-import lane_detection_ver1 as lane_detection
-import ugv_control
-from ultrasonic_reader import UltrasonicReader
+import serial
 
-# ============================================================
-# Configuration
-# ============================================================
-UGV_PORT = "/dev/ttyACM0"
-ULTRASONIC_PORT = "/dev/ttyUSB0"
-SERIAL_BAUD = 115200
 
-FRAME_WIDTH = 640
-FRAME_TIMEOUT = 0.5
-MAX_CAMERA_FAILURES = 3
+STALE_S = 0.35
+MAX_TEST_YAW_DEG = 20.0
 
-BASE_SPEED = 0.30             # m/s (일반 차선 추종)
-AVOID_SPEED = 0.15            # m/s 
-PASS_SPEED = 0.30             # m/s (대각선 및 직진 통과)
 
-FRONT_STOP_CM =   100.0       # 회피 시작 기준 거리
-TURN_OUT_TIME_S = 0.60
-DIAGONAL_TIME_S = 2.5      
-ALIGN_TIME_S = 0.60
+def norm(angle):
+    return (angle + 180.0) % 360.0 - 180.0
 
-TURN_ANGULAR_SPEED = 2.2      # 제자리 회전 각속도
-PASS_DISTANCE_CM = 100.0     
-PASS_TIMEOUT_S = PASS_DISTANCE_CM / (PASS_SPEED * 100.0)
 
-CONTROL_PERIOD_S = 0.02
-NO_OBSTACLE = -1.0
-TERMINAL_LOG_INTERVAL_S = 1.0
+class ImuReader:
+    def __init__(self, ser, unit):
+        self.ser = ser
+        self.unit = unit
+        self.lock = threading.Lock()
+        self.done = threading.Event()
+        self.yaw = None
+        self.total = 0.0
+        self.stamp = None
+        self.error = None
+        self.thread = threading.Thread(target=self.run, daemon=True)
 
-SHOW_WINDOWS = bool(os.environ.get("DISPLAY")) and not bool(
-    os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_CLIENT") or os.environ.get("SSH_TTY")
-)
+    def snapshot(self):
+        with self.lock:
+            return self.yaw, self.total, self.stamp, self.error
 
-# ============================================================
-# FSM State & Direction
-# ============================================================
-class State(Enum):
-    LANE_FOLLOWING = auto()    
-    AVOID_TURN_OUT = auto()    
-    AVOID_DIAGONAL = auto()    
-    AVOID_ALIGN = auto()       
-    AVOID_FORWARD = auto()     
-    RECOVERY_TURN_IN = auto()  
-    RECOVERY_DIAGONAL = auto() 
-    RECOVERY_ALIGN = auto()    
-
-class AvoidDirection(Enum):
-    LEFT = 1     
-    RIGHT = -1   
-
-# ============================================================
-# Shared Globals 
-# ============================================================
-error_lock = threading.Lock()
-shared_error = 0.0
-shared_speed = 0.0
-shared_angular_override = None  
-shared_frame_time = None
-is_running = True
-control_failure = None
-
-state = State.LANE_FOLLOWING             
-state_enter_time = time.monotonic()      
-avoid_direction = AvoidDirection.LEFT    
-front_obstacle_count = 0                 
-recovery_detect_count = 0                
-
-avoid_count = 0           
-recovery_done_count = 0    
-
-def set_command(speed, angular_override, error=None):
-    global shared_speed, shared_angular_override, shared_error
-    with error_lock:
-        shared_speed = float(speed)
-        shared_angular_override = None if angular_override is None else float(angular_override)
-        if error is not None:
-            shared_error = float(error)
-
-def force_stop():
-    set_command(0.0, 0.0)
-
-def transition(new_state):
-    global state, state_enter_time
-    state = new_state
-    state_enter_time = time.monotonic()
-    print(f"\n[FSM TRANSITION] -> {state.name}", flush=True)
-
-def state_elapsed():
-    return time.monotonic() - state_enter_time
-
-# ============================================================
-# Vision & Pipeline Logic
-# ============================================================
-def gstreamer_pipeline(sensor_id=0, capture_width=1640, capture_height=1232, display_width=820, display_height=616, framerate=30, flip_method=0):
-    return (
-        f"nvarguscamerasrc sensor-id={sensor_id} ! video/x-raw(memory:NVMM), width=(int){capture_width}, height=(int){capture_height}, format=(string)NV12, framerate=(fraction){framerate}/1 ! "
-        f"nvvidconv flip-method={flip_method} ! video/x-raw, width=(int){display_width}, height=(int){display_height}, format=(string)BGRx ! videoconvert ! video/x-raw, format=(string)BGR ! appsink drop=true max-buffers=1 sync=false"
-    )
-
-def process_lane_frame(frame, tracker, now):
-    target_height = max(2, round(frame.shape[0] * FRAME_WIDTH / frame.shape[1]))
-    frame = cv2.resize(frame, (FRAME_WIDTH, target_height))
-    _, edges, top, bottom = lane_detection.get_edges(frame, return_raw=True)
-    pair, status, inferred = tracker.update(edges, top, bottom, now)
-    result_image, error, is_detected = lane_detection.draw_result(frame.copy(), pair, status, inferred, top, bottom)
-    return error, result_image, is_detected, pair
-
-def get_obstacle_direction_by_contour(frame, pair):
-    if pair is None or len(pair) < 2:
-        return AvoidDirection.LEFT
-    height, width = frame.shape[:2]
-    y_eval_norm = (0.52 + 0.84) / 2.0
-    x_left = np.polyval(pair[0], y_eval_norm)
-    x_right = np.polyval(pair[1], y_eval_norm)
-    lane_center = (x_left + x_right) / 2.0
-    margin_px = int((x_right - x_left) * 0.10)
-    
-    y1, y2 = int(height * 0.52), int(height * 0.84)
-    x1 = max(0, int(x_left + margin_px))
-    x2 = min(width, int(x_right - margin_px))
-
-    if x2 <= x1 or y2 <= y1:
-        return AvoidDirection.LEFT
-
-    roi = frame[y1:y2, x1:x2]
-    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    kernel = np.ones((5, 5), np.uint8)
-    thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
-    thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    min_area = max(40, int((x2 - x1) * (y2 - y1) * 0.01))
-    valid_contours = [c for c in contours if cv2.contourArea(c) >= min_area]
-
-    if valid_contours:
-        largest_contour = max(valid_contours, key=cv2.contourArea)
-        bx, _, bw, _ = cv2.boundingRect(largest_contour)
-        if (x1 + bx + bw / 2.0) >= lane_center:
-            return AvoidDirection.LEFT
-        return AvoidDirection.RIGHT
-    return AvoidDirection.LEFT
-
-# ============================================================
-# Ultrasonic Reader & Control Thread
-# ============================================================
-def create_ultrasonic_reader():
-    reader = UltrasonicReader(port=ULTRASONIC_PORT, baudrate=SERIAL_BAUD)
-    if not reader.start():
-        raise RuntimeError("아두이노 초음파 센서 시리얼 연결 실패")
-    return reader
-
-def read_distances(reader):
-    values = reader.get_distances()
-    if not isinstance(values, (tuple, list)) or len(values) != 3:
-        raise ValueError("get_distances() 형태 오류")
-    result = []
-    for value in values:
+    def run(self):
+        buffer = b''
         try:
-            d = float(value)
-            result.append(d if math.isfinite(d) else NO_OBSTACLE)
-        except (TypeError, ValueError):
-            result.append(NO_OBSTACLE)
-    return tuple(result)
+            while not self.done.is_set():
+                chunk = self.ser.read(min(max(self.ser.in_waiting, 1), 4096))
+                if not chunk:
+                    continue
+                buffer += chunk
+                lines = buffer.split(b'\n')
+                buffer = lines[-1][-8192:]
+                # Use the newest valid yaw in each read; never compete with another reader.
+                for line in reversed(lines[:-1]):
+                    try:
+                        packet = json.loads(line.decode('utf-8', errors='ignore'))
+                        if not isinstance(packet, dict):
+                            continue
+                        value = packet.get('yaw', packet.get('y'))
+                        if value is None:
+                            continue
+                        value = float(value)
+                        if not math.isfinite(value):
+                            continue
+                        yaw = math.degrees(value) if self.unit == 'rad' else value
+                    except (ValueError, TypeError, OverflowError):
+                        continue
+                    with self.lock:
+                        if self.yaw is not None:
+                            step = norm(yaw - self.yaw)
+                            if abs(step) > 45.0:
+                                self.error = 'IMU angle jump >45deg; test stopped'
+                                return
+                            self.total += step
+                        self.yaw = yaw
+                        self.stamp = time.monotonic()
+                    break
+        except Exception as exc:
+            with self.lock:
+                self.error = f'{type(exc).__name__}: {exc}'
 
-def control_thread_task(ugv_serial):
-    global is_running, control_failure
-    previous_error = previous_frame_time = None
-    angular_z = 0.0
 
-    print("[알림] 제어 스레드 시작", flush=True)
+def send(ser, packet):
+    data = (json.dumps(packet, allow_nan=False) + '\n').encode('utf-8')
+    if ser.write(data) != len(data):
+        raise IOError('일부 명령만 전송됨')
+
+
+def stop(ser):
+    # Attempt both command formats independently, even if the first fails.
+    ok = True
+    for packet in ({'T': 13, 'X': 0.0, 'Z': 0.0},
+                   {'T': 1, 'L': 0.0, 'R': 0.0}):
+        try:
+            send(ser, packet)
+        except Exception as exc:
+            ok = False
+            print(f'[정지 전송 실패] {exc}', flush=True)
+    return ok
+
+
+def fresh(imu):
+    yaw, total, stamp, error = imu.snapshot()
+    if error:
+        raise RuntimeError(error)
+    if stamp is None or time.monotonic() - stamp > STALE_S:
+        raise RuntimeError('IMU yaw 수신 없음 또는 0.35초 이상 갱신 지연')
+    return yaw, total
+
+
+def settle(ser, imu, seconds, base=None):
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        if not stop(ser):
+            raise IOError('정지 명령 전송 실패: 전원을 직접 차단하세요')
+        _, total = fresh(imu)
+        if base is not None and abs(total - base) > MAX_TEST_YAW_DEG:
+            raise RuntimeError('시험 누적 회전량 20도 초과: 시험 중단')
+        time.sleep(0.05)
+
+
+def trial(ser, imu, z, duration):
+    input(f'\n[대기] Z={z:+.2f}, X=0, {duration:.2f}초 시험. '
+          '안전 확보 후 Enter (취소 Ctrl+C): ')
+    settle(ser, imu, 0.5)
+    yaw0, total0 = fresh(imu)
+    print(f'[START] yaw={yaw0:+.2f}deg / T=13 X=0 Z={z:+.2f}', flush=True)
+    start = time.monotonic()
+    next_log = 0.0
     try:
-        while is_running:
-            ugv_control.clear_feedback_buffer(ugv_serial)
+        while True:
             now = time.monotonic()
-
-            with error_lock:
-                c_err, c_spd, override, f_time = shared_error, shared_speed, shared_angular_override, shared_frame_time
-
-            stale = (f_time is None or now - f_time > FRAME_TIMEOUT)
-
-            if stale or (c_spd <= 0 and override is None):
-                c_spd = 0.0 if override is None else c_spd
-                angular_z = override if override is not None else 0.0
-                previous_error = previous_frame_time = None
-            else:
-                if override is not None:
-                    angular_z = override
-                    previous_error = previous_frame_time = None
-                else:
-                    if previous_frame_time is None or f_time != previous_frame_time:
-                        dt = (f_time - previous_frame_time) if previous_frame_time else 1.0
-                        angular_z = ugv_control.calculate_pid(c_err, previous_error, dt)
-                        previous_error, previous_frame_time = c_err, f_time
-
-            ugv_control.send_driving_command(ugv_serial, c_spd, angular_z)
-            time.sleep(CONTROL_PERIOD_S)
-    except Exception as exc:
-        control_failure = f"{type(exc).__name__}: {exc}"
-        print(f"[에러] 제어 스레드 중단: {control_failure}", flush=True)
-        is_running = False
+            elapsed = now - start
+            if elapsed >= duration:
+                break
+            yaw, total = fresh(imu)
+            delta = total - total0
+            if abs(delta) >= MAX_TEST_YAW_DEG:
+                raise RuntimeError('시험 누적 회전량 20도 도달: 시험 중단')
+            send(ser, {'T': 13, 'X': 0.0, 'Z': z})
+            if elapsed >= next_log:
+                print(f'[RUN] t={elapsed:.2f}s Z={z:+.2f} '
+                      f'yaw={yaw:+.2f}deg delta={delta:+.2f}deg', flush=True)
+                next_log = elapsed + 0.2
+            time.sleep(0.05)
     finally:
-        try:
-            ugv_control.send_driving_command(ugv_serial, 0.0, 0.0)
-        except:
-            pass
-
-# ============================================================
-# FSM Logic
-# ============================================================
-def check_recovery_lane_detection(is_detected):
-    global recovery_detect_count
-    if is_detected:
-        recovery_detect_count += 1
-        if recovery_detect_count >= 5:
-            recovery_detect_count = 0
-            force_stop()
-            print("[RECOVERY COMPLETE] 차선 감지 -> LANE_FOLLOWING 복귀", flush=True)
-            transition(State.LANE_FOLLOWING)
-            return True
+        stop(ser)
+    # Include residual motion in the measured result while keeping a stop command active.
+    settle(ser, imu, 0.8, base=total0)
+    yaw1, total1 = fresh(imu)
+    delta = total1 - total0
+    if abs(delta) < 1.0:
+        meaning = '변화 작음: 방향 판정 보류 (명령 무응답/작은 회전/마찰 등 확인)'
+    elif delta > 0:
+        meaning = 'Yaw 증가 -> 앞선 수동 시험 기준 왼쪽 회전'
     else:
-        recovery_detect_count = 0
-    return False
+        meaning = 'Yaw 감소 -> 앞선 수동 시험 기준 오른쪽 회전'
+    print(f'[RESULT] Z={z:+.2f} yaw_before={yaw0:+.2f} '
+          f'yaw_after={yaw1:+.2f} delta={delta:+.2f}deg | {meaning}', flush=True)
+    print('실제 눈으로 본 방향도 함께 기록하세요. 바퀴를 띄우면 차체 Yaw 판정은 불가합니다.', flush=True)
+    return z, delta
 
-def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
-    global avoid_direction, state, front_obstacle_count, avoid_count, recovery_done_count
 
-    # 1. 차선 추종
-    if state == State.LANE_FOLLOWING:
-        if 0.0 < front_d <= FRONT_STOP_CM:
-            front_obstacle_count += 1
-        else:
-            front_obstacle_count = 0
-
-        if front_obstacle_count >= 3:
-            front_obstacle_count = avoid_count = recovery_done_count = 0
-            force_stop()
-            
-            vision_dir = get_obstacle_direction_by_contour(frame, pair)
-            if 25.0 < left_d and 25.0 < right_d:
-                if left_d > right_d + 15.0:  
-                    avoid_direction = AvoidDirection.LEFT
-                elif right_d > left_d + 15.0:
-                    avoid_direction = AvoidDirection.RIGHT
-                else:
-                    avoid_direction = vision_dir
-            else:
-                avoid_direction = vision_dir
-                
-            print(f"\n[OBSTACLE DETECTED] Front: {front_d:.1f}cm -> Avoid Dir: {avoid_direction.name}", flush=True)
-            transition(State.AVOID_TURN_OUT)
-        elif not is_detected:
-            force_stop()
-        else:
-            set_command(BASE_SPEED, None, error=error)
-        return
-
-    # 2. 제자리 회전
-    if state == State.AVOID_TURN_OUT:
-        set_command(0.0, avoid_direction.value * TURN_ANGULAR_SPEED)
-        if state_elapsed() >= TURN_OUT_TIME_S:
-            force_stop()
-            transition(State.AVOID_DIAGONAL)
-        return
-
-    # 3. 대각선 전진
-    if state == State.AVOID_DIAGONAL:
-        set_command(PASS_SPEED, 0.0)
-        if state_elapsed() >= DIAGONAL_TIME_S:
-            force_stop()
-            transition(State.AVOID_ALIGN)
-        return
-
-    # 4. 제자리 정렬 및 장애물 재확인
-    if state == State.AVOID_ALIGN:
-        set_command(0.0, -avoid_direction.value * TURN_ANGULAR_SPEED)
-        if state_elapsed() >= ALIGN_TIME_S:
-            force_stop()
-            avoid_count += 1 
-            side_d = right_d if avoid_direction == AvoidDirection.LEFT else left_d
-            
-            if (0.0 < front_d <= FRONT_STOP_CM) or (25.0 < side_d <= 40.0):
-                print(f"[RE-AVOID] 추가 회피 (Front: {front_d:.1f}cm, Side: {side_d:.1f}cm)", flush=True)
-                transition(State.AVOID_TURN_OUT)
-            else:
-                transition(State.AVOID_FORWARD)
-        return
-
-    # 5. 직진 통과
-    if state == State.AVOID_FORWARD:
-        set_command(PASS_SPEED, 0.0)
-        if state_elapsed() >= PASS_TIMEOUT_S:
-            side_d = right_d if avoid_direction == AvoidDirection.LEFT else left_d
-            if not (25.0 < side_d <= 50.0):
-                force_stop()
-                recovery_done_count = 0
-                transition(State.RECOVERY_TURN_IN)
-        return
-
-    # 6. 복귀 기동 (회전 - 대각선 - 정렬)
-    if state == State.RECOVERY_TURN_IN:
-        if check_recovery_lane_detection(is_detected): return
-        set_command(0.0, -avoid_direction.value * TURN_ANGULAR_SPEED)
-        if state_elapsed() >= TURN_OUT_TIME_S:
-            force_stop()
-            transition(State.RECOVERY_DIAGONAL)
-        return
-
-    if state == State.RECOVERY_DIAGONAL:
-        if check_recovery_lane_detection(is_detected): return
-        set_command(PASS_SPEED, 0.0)
-        if state_elapsed() >= DIAGONAL_TIME_S:
-            force_stop()
-            transition(State.RECOVERY_ALIGN)
-        return
-
-    if state == State.RECOVERY_ALIGN:
-        set_command(0.0, avoid_direction.value * TURN_ANGULAR_SPEED)
-        if state_elapsed() >= ALIGN_TIME_S:
-            force_stop()
-            recovery_done_count += 1
-            if recovery_done_count >= avoid_count or is_detected:
-                avoid_count = recovery_done_count = 0
-                transition(State.LANE_FOLLOWING)
-            else:
-                transition(State.RECOVERY_TURN_IN)
-        return
-
-# ============================================================
-# Main Loop
-# ============================================================
 def main():
-    global is_running, shared_frame_time, control_failure
-
-    if lane_detection.ROAD_MODE not in ("highway", "black_track"):
-        print("[에러] ROAD_MODE 설정을 확인하세요.", flush=True)
-        return
-
-    ugv_serial = ultrasonic = cap = control_thread = None
-    window_name = "UGV - Autonomous Avoidance"
-    
+    parser = argparse.ArgumentParser(description='T:13 양/음 Z 제자리 회전 방향 시험')
+    parser.add_argument('--port', default='/dev/ttyACM0')
+    parser.add_argument('--unit', choices=['rad', 'deg'], default='rad')
+    parser.add_argument('--z', type=float, default=0.20)
+    parser.add_argument('--duration', type=float, default=1.0)
+    args = parser.parse_args()
+    if not math.isfinite(args.z) or not 0 < args.z <= 0.30:
+        parser.error('--z는 0 초과 0.30 이하')
+    if not math.isfinite(args.duration) or not 0 < args.duration <= 1.5:
+        parser.error('--duration은 0 초과 1.5초 이하')
+    ser = imu = None
     try:
-        ugv_serial = ugv_control.init_ugv(port=UGV_PORT, baudrate=SERIAL_BAUD)
-        ugv_control.send_driving_command(ugv_serial, 0.0, 0.0)
-
-        ultrasonic = create_ultrasonic_reader()
-        time.sleep(0.5)
-
-        cap = cv2.VideoCapture(gstreamer_pipeline(flip_method=0), cv2.CAP_GSTREAMER)
-        tracker = lane_detection.LaneTracker()
-
-        if SHOW_WINDOWS:
-            cv2.namedWindow(window_name)
-
-        control_thread = threading.Thread(target=control_thread_task, args=(ugv_serial,), daemon=True)
-        control_thread.start()
-        
-        failure_count = 0
-        report_time = time.monotonic()
-
-        while is_running and cap.isOpened():
-            frame_started = time.monotonic()
-            ret, frame = cap.read()
-
-            if not ret or frame is None or frame.size == 0:
-                force_stop()
-                tracker.reset()
-                failure_count += 1
-                if failure_count >= MAX_CAMERA_FAILURES: break
-                time.sleep(0.05)
-                continue
-
-            failure_count = 0
-            error, result_image, is_detected, pair = process_lane_frame(frame, tracker, frame_started)
-            left_d, front_d, right_d = read_distances(ultrasonic)
-
-            with error_lock:
-                if not is_running: break
-                shared_frame_time = frame_started
-
-            run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d)
-
-            now = time.monotonic()
-            if now - report_time >= TERMINAL_LOG_INTERVAL_S:
-                usable = (bool(is_detected) and now - frame_started <= FRAME_TIMEOUT)
-                print(f"[MONITOR] State: {state.name:<18} | US Front: {front_d:5.1f}cm | Avoid/Recov: {avoid_count}/{recovery_done_count} | Error: {error:+.1f} | Usable: {usable}", flush=True)
-                report_time = now
-
-            if SHOW_WINDOWS:
-                cv2.putText(result_image, f"STATE: {state.name}", (10, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
-                cv2.putText(result_image, f"Avoid: {avoid_direction.name} ({avoid_count}x)", (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 0), 1)
-                cv2.imshow(window_name, result_image)
-                if cv2.waitKey(1) & 0xFF in (ord("q"), ord("Q"), 27): break
-                    
-        if control_failure: print(f"제어 오류: {control_failure}")
-
+        print('[주의] 다른 주행/IMU 프로그램을 종료하세요. 장애물 없는 여유 공간에서 시험하세요.')
+        print('모든 주행 명령은 X=0입니다. 통신 장애 시 소프트웨어 정지는 보장되지 않습니다.')
+        print('즉시 전원 차단 가능 상태를 확보하세요. yaw 단위 기본값 rad (자동 판별 아님).', flush=True)
+        ser = serial.Serial(args.port, 115200, timeout=0.05, write_timeout=0.1)
+        if not stop(ser):
+            raise IOError('초기 정지 전송 실패')
+        ser.reset_input_buffer()
+        imu = ImuReader(ser, args.unit)
+        imu.thread.start()
+        send(ser, {'T': 131, 'cmd': 1})
+        deadline = time.monotonic() + 3.0
+        while imu.snapshot()[2] is None:
+            if imu.snapshot()[3] or time.monotonic() >= deadline:
+                raise RuntimeError('초기 IMU 수신 실패')
+            time.sleep(0.02)
+        fresh(imu)
+        results = []
+        for z in (args.z, -args.z):
+            results.append(trial(ser, imu, z, args.duration))
+        print('\n[SUMMARY] 실제 육안 관찰과 아래 결과를 함께 공유하세요.')
+        for z, delta in results:
+            print(f'Z={z:+.2f} -> delta_yaw={delta:+.2f}deg')
+        print('이 시험은 X=0의 방향 확인만 수행합니다. 전진 중 응답이나 이동 거리를 보장하지 않습니다.')
     except KeyboardInterrupt:
-        print("\n[STOP] Keyboard Interrupt detected.")
-    except Exception:
-        traceback.print_exc()
+        print('\n[중단] Ctrl+C')
+    except Exception as exc:
+        print(f'\n[중단] {type(exc).__name__}: {exc}', flush=True)
     finally:
-        is_running = False
-        print("[종료] 로봇 정지 명령 전송 중...")
-        
-        # [수정] 스레드가 닫히기 전에 메인에서 강제 정지 명령 우선 전송
-        if ugv_serial is not None:
+        if ser is not None:
+            for _ in range(3):
+                stop(ser)
+                time.sleep(0.05)
             try:
-                ugv_control.send_driving_command(ugv_serial, 0.0, 0.0)
-                time.sleep(0.1)  # 하드웨어가 정지 명령을 받을 수 있도록 짧은 대기
-            except:
-                pass
+                send(ser, {'T': 131, 'cmd': 0})
+            except Exception as exc:
+                print(f'[경고] 피드백 종료 전송 실패: {exc}')
+            if imu is not None:
+                imu.done.set()
+                imu.thread.join(timeout=0.5)
+            ser.close()
+        print('[종료] 정지 명령 전송 시도 및 포트 닫기 완료', flush=True)
 
-        if control_thread is not None:
-            control_thread.join(timeout=1.0)
-            
-        if ugv_serial is not None:
-            ugv_control.stop_ugv(ugv_serial)
-            
-        if ultrasonic is not None:
-            ultrasonic.stop()
-        if cap is not None:
-            cap.release()
-        if SHOW_WINDOWS:
-            cv2.destroyAllWindows()
-    # =============== 여기까지 덮어쓰기 ===============
 
-# 이 두 줄은 건드리지 않고 그대로 둡니다.
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
