@@ -142,6 +142,7 @@ current_yaw = None
 return_turn_start_yaw = None
 return_turn_last_yaw = None
 return_turn_accum_deg = 0.0
+return_turn_direction = 0
 
 return_drive_start_odl = None
 return_drive_start_odr = None
@@ -245,6 +246,7 @@ def hc12_thread_task():
     global return_turn_start_yaw
     global return_turn_last_yaw
     global return_turn_accum_deg
+    global return_turn_direction
 
     global align_stable_count
     global paused_return_mode
@@ -601,6 +603,7 @@ def hc12_thread_task():
                             return_turn_start_yaw = current_yaw
                             return_turn_last_yaw = current_yaw
                             return_turn_accum_deg = 0.0
+                            return_turn_direction = 0
 
                             align_stable_count = 0
                             paused_return_mode = None
@@ -718,6 +721,7 @@ def ugv_receive_thread_task():
     global return_turn_last_yaw
     global return_turn_accum_deg
     global tipped_notified
+    global return_turn_direction
 
     print("[알림] UGV 수신 스레드 시작")
 
@@ -963,9 +967,21 @@ def ugv_receive_thread_task():
                                 current_yaw - return_turn_last_yaw + 180.0
                             ) % 360.0 - 180.0
 
-                            # T2100이 약 50 ms 주기로 오므로 1회 45도 초과 점프만 비정상값으로 무시
-                            if abs(yaw_delta) <= 45.0:
-                                return_turn_accum_deg += abs(yaw_delta)
+                            # 첫 번째 유의미한 yaw 변화로 실제 회전 방향 결정
+                            if return_turn_direction == 0 and abs(yaw_delta) >= 0.5:
+                                return_turn_direction = 1 if yaw_delta > 0 else -1
+
+                            # 비정상적인 큰 점프는 무시
+                            if abs(yaw_delta) <= 45.0 and return_turn_direction != 0:
+
+                                # 처음 결정한 회전방향 기준의 순수 변화량
+                                directed_delta = yaw_delta * return_turn_direction
+
+                                # 반대 방향으로 흔들리면 누적각에서도 빼줌
+                                return_turn_accum_deg += directed_delta
+
+                                # 센서 노이즈 때문에 누적값이 음수가 되는 것은 방지
+                                return_turn_accum_deg = max(0.0, return_turn_accum_deg)
 
                             return_turn_last_yaw = current_yaw
 
@@ -1184,19 +1200,24 @@ def control_thread_task():
 
         elif current_mode == "RETURN_TURN":
 
-            # 기존과 같은 회전 방향을 유지하되, 목표각 근처에서는 감속
             with state_lock:
                 remaining_deg = max(
                     0.0,
                     RETURN_TURN_TARGET_DEG - return_turn_accum_deg,
                 )
 
-            turn_speed = (
-                TURN_SLOW_SPEED if remaining_deg <= TURN_SLOW_REMAIN_DEG else TURN_SPEED
+            # 바닥 마찰 / 전압강하 완화를 위해
+            # 완전 제자리 회전 대신 완만한 pivot turn 사용
+            if remaining_deg <= TURN_SLOW_REMAIN_DEG:
+                left_speed = -0.06
+                right_speed = 0.16
+            else:
+                left_speed = -0.08
+                right_speed = 0.20
+
+            send_raw_ugv(
+                '{"T":1,' f'"L":{left_speed:.3f},' f'"R":{right_speed:.3f}' "}"
             )
-
-            send_raw_ugv('{"T":1,' f'"L":{-turn_speed},' f'"R":{turn_speed}' "}")
-
         # ============================================================
         # RETURN_ALIGN
         #
