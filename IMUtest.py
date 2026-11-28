@@ -6,9 +6,10 @@
 # 4. 복귀 회전 각도(RECOVERY_TURN_ANGLE_DEG) 별도 분리 및 AVOID_FORWARD 들여쓰기 오류 수정
 # 5. AVOID_ALIGN 초기 오버슈트 저감: 전진 후 정지 대기(AVOID_DIAGONAL_PAUSE), 선형 감속,
 #    목표각 통과 즉시 제동, 회전 중 차선 인식 생략(IMU 응답 속도 향상) 적용
-# 6. 프로그램 시작 시점의 직선 도로 정면 Yaw(track_fr   ont_yaw)를 확정하여 정렬 기준각(initial_yaw)으로 적용
+# 6. 프로그램 시작 시점의 직선 도로 정면 Yaw(track_front_yaw)를 확정하여 정렬 기준각(initial_yaw)으로 적용
 # 7. 라인 트레이싱(GStreamer appsink, BASE_SPEED, frame_seq/frame_time 동기화, PID 루프 및 차선 미검출 정지)을
 #    light_control2.py 방식으로 교체
+# 8. 실내(무차선) 장애물 회피 단독 테스트를 위한 IGNORE_LANE_MODE 추가
 import cv2
 import time
 import threading
@@ -23,6 +24,13 @@ import ugv_control
 from ultrasonic_reader import UltrasonicReader
 
 import json
+
+# ============================================================
+# Test Mode Setting
+# ============================================================
+# True : 차선 없이 집에서 직진 주행 + 초음파 장애물 회피 알고리즘만 테스트
+# False: 실제 인공 도로에서 차선 추종 + 장애물 회피 함께 동작
+IGNORE_LANE_MODE = True
 
 # ============================================================
 # IMU & Direct Wheel Turn Settings (light_control2 방식 반영)
@@ -478,7 +486,10 @@ def control_thread_task(ugv_serial):
     lane_lost_printed = False
     was_lane_tracing = False
 
-    print("[알림] 제어 스레드 시작 (light_control2 라인 트레이싱 + 시리얼 타임아웃 보호)", flush=True)
+    print(
+        f"[알림] 제어 스레드 시작 (IGNORE_LANE_MODE={IGNORE_LANE_MODE})",
+        flush=True,
+    )
     try:
         while is_running:
             now = time.monotonic()
@@ -541,9 +552,18 @@ def control_thread_task(ugv_serial):
                 send_driving_safe(ugv_serial, 0.0, 0.0)
             else:
                 # ====================================================
+                # 차선 없는 실내 테스트 모드: 차선 없이 직진하며 장애물 대기
+                # ====================================================
+                if IGNORE_LANE_MODE:
+                    previous_error = None
+                    filtered_derivative = 0.0
+                    last_frame_seq = current_frame_seq
+                    last_frame_time = None
+                    send_driving_safe(ugv_serial, c_spd, 0.0)
+                # ====================================================
                 # light_control2.py 라인 트레이싱 (DRIVE) 제어 로직
                 # ====================================================
-                if detected:
+                elif detected:
                     is_new_frame = current_frame_seq != last_frame_seq
 
                     if is_new_frame:
@@ -624,7 +644,7 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
         force_stop()
         return
 
-    # 1. 차선 추종
+    # 1. 차선 추종 (IGNORE_LANE_MODE=True일 때는 직진하며 초음파 장애물 감지)
     if state == State.LANE_FOLLOWING:
         is_front_close = (0.0 < front_d <= FRONT_STOP_CM) or (front_obstacle_count > 0 and front_d < 0)
 
@@ -655,7 +675,6 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
             return
 
         elif front_obstacle_count == 0:
-            # 차선 검출/미검출 정지 및 PID는 control_thread_task에서 light_control2 방식으로 처리
             set_command(BASE_SPEED, None)
         return
 
@@ -700,6 +719,7 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
 
         set_command(AVOID_SPEED, 0.0)
         return
+
     # 3-1. 대각선 전진 직후 완전 정지 (전진 관성 제거)
     if state == State.AVOID_DIAGONAL_PAUSE:
         force_stop()
@@ -766,8 +786,8 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
 
     # 4-1. 정렬 완료 후 잠시 대기 (관성 제어 및 안정화)
     if state == State.AVOID_ALIGN_PAUSE:
-        force_stop()  # 차체 강제 정지 유지
-        if state_elapsed() >= 0.7:  # <--- 0.7초 딜레이 (원하는 시간으로 수정 가능)
+        force_stop()
+        if state_elapsed() >= 0.7:
             print("[정렬 딜레이 완료] 직진 통과 시작", flush=True)
             transition(State.AVOID_FORWARD)
         return
@@ -777,7 +797,7 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
         set_command(PASS_SPEED, 0.0)
         min_pass_time = 1.0 / PASS_SPEED
 
-        if state_elapsed() >= min_pass_time:  # min_pass_time 대신 2.0 등 고정 시간 사용 가능
+        if state_elapsed() >= min_pass_time:
             force_stop()
             print("[통과] 지정 시간 직진 완료 -> 복귀 기동 시작", flush=True)
             reset_turn()
@@ -794,13 +814,17 @@ def run_fsm(error, is_detected, frame, pair, left_d, front_d, right_d):
         return
 
     if state == State.RECOVERY_DIAGONAL:
-        if check_recovery_lane_detection(is_detected):
+        if not IGNORE_LANE_MODE and check_recovery_lane_detection(is_detected):
             return
         set_command(PASS_SPEED, 0.0)
 
-        if state_elapsed() >= 6.0:
+        recovery_timeout = 1.5 if IGNORE_LANE_MODE else 6.0
+        if state_elapsed() >= recovery_timeout:
             force_stop()
-            print("[에러] 타임아웃: 차선을 찾지 못했습니다.", flush=True)
+            if IGNORE_LANE_MODE:
+                print("[복귀 완료] 차선 미사용 테스트 모드 -> LANE_FOLLOWING 복귀", flush=True)
+            else:
+                print("[에러] 타임아웃: 차선을 찾지 못했습니다.", flush=True)
             transition(State.LANE_FOLLOWING)
         return
 
@@ -871,7 +895,7 @@ def main():
             failure_count = 0
             frame_time = time.monotonic()
 
-            need_lane = state in (State.LANE_FOLLOWING, State.RECOVERY_DIAGONAL)
+            need_lane = (not IGNORE_LANE_MODE) and state in (State.LANE_FOLLOWING, State.RECOVERY_DIAGONAL)
             if need_lane:
                 error, result_image, is_detected, pair, raw_edges, lane_edges_img = process_lane_frame(
                     frame, lane_tracker, frame_time
